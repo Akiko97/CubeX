@@ -68,7 +68,7 @@ run_and_expect examples/wasm-access-control/cubex.toml '"decision": String("allo
 run_and_expect examples/wasm-access-control/cubex.toml '"decision": String("denied")'
 run_and_expect examples/wasm-register-bank/cubex.toml 'wasm-print: Record({"address": U64(7), "value": U64(42)})'
 run_and_expect examples/wasm-timer/cubex.toml 'wasm-print: Record({"count": U64(3), "index": U64(2)})'
-run_and_expect examples/wasm-random/cubex.toml "wasm-print: random bytes: 16"
+run_and_expect examples/wasm-random/cubex.toml "wasm-print: random bytes: "
 run_and_expect examples/wasm-network/cubex.toml "wasm-print: wasm network ping"
 run_and_expect examples/wasm-record-store/cubex.toml "wasm-print: demo-record"
 

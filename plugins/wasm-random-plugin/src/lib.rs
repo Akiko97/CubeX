@@ -25,12 +25,16 @@ impl Plugin for WasmRandomPlugin {
             messages: vec![Message::new(
                 request.plugin,
                 topic,
-                Payload::Text(format!("random bytes: {}", bytes.len())),
+                Payload::Text(format!("random bytes: {}", hex(&bytes))),
             )],
             logs: Vec::new(),
             error: None,
         })
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn parse_len(value: Option<&String>) -> anyhow::Result<u32> {
