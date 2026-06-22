@@ -1,0 +1,34 @@
+[engine]
+name = "record-store-delete"
+max_messages = 32
+
+[[plugins]]
+name = "record-delete"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["delete.txt", "record.delete", "record-key"]
+autostart = true
+
+[[plugins]]
+name = "record-store"
+command = "../../target/debug/cubex-record-store-plugin"
+working_dir = "."
+args = ["records.bin"]
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "delete-to-store"
+source = "record-delete"
+topic = "record.delete"
+payload = "record"
+to = ["record-store"]
+
+[[routes]]
+name = "deleted-to-print"
+source = "record-store"
+topic = "record.deleted"
+payload = "text"
+to = ["print"]

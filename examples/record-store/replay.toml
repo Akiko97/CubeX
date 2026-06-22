@@ -1,0 +1,37 @@
+[engine]
+name = "record-store-replay"
+max_messages = 32
+
+[store]
+path = "events.bin"
+replay_on_start = true
+
+[[plugins]]
+name = "record-source"
+command = "../../target/debug/cubex-record-source-plugin"
+args = ["demo-record", "stored through CubeX"]
+autostart = false
+
+[[plugins]]
+name = "record-store"
+command = "../../target/debug/cubex-record-store-plugin"
+working_dir = "."
+args = ["records.bin"]
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "records-to-store"
+source = "record-source"
+topic = "record.put"
+payload = "record"
+to = ["record-store"]
+
+[[routes]]
+name = "store-acks-to-print"
+source = "record-store"
+topic = "record.stored"
+payload = "text"
+to = ["print"]

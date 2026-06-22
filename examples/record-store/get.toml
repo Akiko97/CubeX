@@ -1,0 +1,34 @@
+[engine]
+name = "record-store-get"
+max_messages = 32
+
+[[plugins]]
+name = "record-get"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["get.txt", "record.get", "record-key"]
+autostart = true
+
+[[plugins]]
+name = "record-store"
+command = "../../target/debug/cubex-record-store-plugin"
+working_dir = "."
+args = ["records.bin"]
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "get-to-store"
+source = "record-get"
+topic = "record.get"
+payload = "record"
+to = ["record-store"]
+
+[[routes]]
+name = "loaded-to-print"
+source = "record-store"
+topic = "record.loaded"
+payload = "text"
+to = ["print"]

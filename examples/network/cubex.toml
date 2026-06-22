@@ -1,0 +1,26 @@
+[engine]
+name = "network-example"
+max_messages = 32
+
+[[plugins]]
+name = "tcp-echo"
+command = "../../target/debug/cubex-tcp-echo-plugin"
+args = ["127.0.0.1:41011", "1"]
+autostart = true
+
+[[plugins]]
+name = "tcp-client"
+command = "../../target/debug/cubex-tcp-client-plugin"
+args = ["127.0.0.1:41011", "network ping", "2000"]
+autostart = true
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "tcp-response-to-print"
+source = "tcp-client"
+topic = "tcp.response"
+payload = "text"
+to = ["print"]

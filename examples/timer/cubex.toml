@@ -1,0 +1,20 @@
+[engine]
+name = "timer-example"
+max_messages = 32
+
+[[plugins]]
+name = "timer"
+command = "../../target/debug/cubex-timer-plugin"
+args = ["3", "0", "timer.tick"]
+autostart = true
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "ticks-to-print"
+source = "timer"
+topic = "timer.tick"
+payload = "record"
+to = ["print"]

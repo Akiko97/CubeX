@@ -1,0 +1,14 @@
+[package]
+name = "cubex-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cubex-protocol = { path = "../cubex-protocol" }
+cubex-store = { path = "../cubex-store" }
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+uuid.workspace = true

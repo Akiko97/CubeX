@@ -1,0 +1,2088 @@
+use crate::config::{Config, PluginConfig, RouteConfig, has_edge_whitespace, validate_config};
+use crate::error::{Error, Result};
+use cubex_protocol::{Control, Message, Payload, PluginRequest, PluginResponse};
+use cubex_store::EventLog;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::{BufReader, BufWriter};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunReport {
+    pub started: Vec<String>,
+    pub replayed: usize,
+    pub delivered: Vec<Delivery>,
+    pub emitted: Vec<Message>,
+    pub logs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivery {
+    pub route: String,
+    pub target: String,
+    pub message_id: uuid::Uuid,
+}
+
+pub struct Engine {
+    name: String,
+    max_messages: usize,
+    store: Option<EventLog>,
+    replay_on_start: bool,
+    plugin_order: Vec<String>,
+    plugins: BTreeMap<String, ProcessPlugin>,
+    routes: Vec<RouteConfig>,
+}
+
+impl Engine {
+    pub fn from_config(config: Config) -> Result<Self> {
+        validate_config(&config)?;
+        let plugin_order = config
+            .plugins
+            .iter()
+            .map(|plugin| plugin.name.clone())
+            .collect();
+        let plugins = config
+            .plugins
+            .into_iter()
+            .map(|plugin| Ok((plugin.name.clone(), ProcessPlugin::new(plugin)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        Ok(Self {
+            name: config.engine.name,
+            max_messages: config.engine.max_messages,
+            store: config.store.path.map(EventLog::new),
+            replay_on_start: config.store.replay_on_start,
+            plugin_order,
+            plugins,
+            routes: config.routes,
+        })
+    }
+
+    pub fn run(&self) -> Result<RunReport> {
+        let result = self.run_inner();
+        let stop_result = self.stop_plugins();
+        match (result, stop_result) {
+            (Ok(mut report), Ok(logs)) => {
+                report.logs.extend(logs);
+                Ok(report)
+            }
+            (Ok(_), Err(err)) | (Err(err), _) => Err(err),
+        }
+    }
+
+    fn run_inner(&self) -> Result<RunReport> {
+        let mut report = RunReport::default();
+        let mut queue = VecDeque::new();
+        let mut started = BTreeSet::new();
+
+        if self.replay_on_start
+            && let Some(store) = &self.store
+        {
+            let messages = store.read_all()?;
+            for message in messages {
+                self.validate_replayed_message(&message)?;
+                report.replayed += 1;
+                queue.push_back(QueuedMessage::replayed(message));
+            }
+        }
+
+        for name in &self.plugin_order {
+            let plugin = self
+                .plugins
+                .get(name)
+                .ok_or_else(|| Error::MissingPlugin(name.clone()))?;
+            if !plugin.autostart {
+                continue;
+            }
+            self.start_plugin(name, plugin, false, &mut queue, &mut report)?;
+            started.insert(name.clone());
+        }
+
+        let mut processed = 0;
+        while let Some(queued) = queue.pop_front() {
+            processed += 1;
+            if processed > self.max_messages {
+                return Err(Error::MessageLimit(self.max_messages));
+            }
+
+            let message = queued.message;
+            if !queued.replayed
+                && let Some(store) = &self.store
+            {
+                store.append(&message)?;
+            }
+            report.emitted.push(message.clone());
+            for route in self.routes.iter().filter(|route| route.matches(&message)) {
+                for target in &route.to {
+                    let plugin = self
+                        .plugins
+                        .get(target)
+                        .ok_or_else(|| Error::MissingPlugin(target.clone()))?;
+                    if !started.contains(target) {
+                        self.start_plugin(
+                            target,
+                            plugin,
+                            queued.replayed,
+                            &mut queue,
+                            &mut report,
+                        )?;
+                        started.insert(target.clone());
+                    }
+                    report.delivered.push(Delivery {
+                        route: route.name.clone(),
+                        target: target.clone(),
+                        message_id: message.id,
+                    });
+                    self.call_plugin(
+                        target,
+                        plugin,
+                        message.clone(),
+                        queued.replayed,
+                        &mut queue,
+                        &mut report,
+                    )?;
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    fn start_plugin(
+        &self,
+        name: &str,
+        plugin: &ProcessPlugin,
+        replayed: bool,
+        queue: &mut VecDeque<QueuedMessage>,
+        report: &mut RunReport,
+    ) -> Result<()> {
+        report.started.push(name.to_string());
+        let start = Message::new(
+            self.name.clone(),
+            "system.start",
+            Payload::Control(Control::Start {
+                args: plugin.args.clone(),
+            }),
+        );
+        self.call_plugin(name, plugin, start, replayed, queue, report)
+    }
+
+    fn stop_plugins(&self) -> Result<Vec<String>> {
+        let mut logs = Vec::new();
+        let mut first_error = None;
+        for name in self.plugin_order.iter().rev() {
+            let plugin = self
+                .plugins
+                .get(name)
+                .ok_or_else(|| Error::MissingPlugin(name.clone()))?;
+            match plugin.shutdown(&self.name) {
+                Ok(Some(mut response)) => {
+                    logs.append(&mut response.logs);
+                    if first_error.is_none() {
+                        if let Err(err) = validate_error_response(name, &response) {
+                            first_error = Some(err);
+                        } else if let Some(reason) = response.error.take() {
+                            first_error = Some(plugin_error(name, reason));
+                        } else if !response.messages.is_empty() {
+                            first_error = Some(Error::InvalidPluginMessage {
+                                plugin: name.clone(),
+                                reason: "system.stop response must not emit messages".into(),
+                            });
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(err) if first_error.is_none() => first_error = Some(err),
+                Err(_) => {}
+            }
+        }
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(logs)
+        }
+    }
+
+    fn call_plugin(
+        &self,
+        name: &str,
+        plugin: &ProcessPlugin,
+        message: Message,
+        replayed: bool,
+        queue: &mut VecDeque<QueuedMessage>,
+        report: &mut RunReport,
+    ) -> Result<()> {
+        let mut response = plugin.call(PluginRequest {
+            plugin: name.to_string(),
+            message,
+        })?;
+        if let Err(err) = validate_error_response(name, &response) {
+            report.logs.append(&mut response.logs);
+            return Err(err);
+        }
+        if let Some(reason) = response.error.take() {
+            report.logs.append(&mut response.logs);
+            return Err(plugin_error(name, reason));
+        }
+        normalize_plugin_messages(name, &mut response.messages)?;
+        queue.extend(
+            response
+                .messages
+                .into_iter()
+                .map(|message| QueuedMessage { message, replayed }),
+        );
+        report.logs.append(&mut response.logs);
+        Ok(())
+    }
+
+    fn validate_replayed_message(&self, message: &Message) -> Result<()> {
+        validate_stored_message(message)?;
+        if message.source != self.name && !self.plugins.contains_key(&message.source) {
+            return Err(Error::InvalidStoredMessage(format!(
+                "source `{}` is not configured",
+                message.source
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn normalize_plugin_messages(name: &str, messages: &mut [Message]) -> Result<()> {
+    for message in messages {
+        if message.id.is_nil() {
+            return Err(Error::InvalidPluginMessage {
+                plugin: name.into(),
+                reason: "id must not be nil".into(),
+            });
+        }
+        if message.topic.trim().is_empty() {
+            return Err(Error::InvalidPluginMessage {
+                plugin: name.into(),
+                reason: "topic must not be empty".into(),
+            });
+        }
+        if has_edge_whitespace(&message.topic) {
+            return Err(Error::InvalidPluginMessage {
+                plugin: name.into(),
+                reason: "topic must not have leading or trailing whitespace".into(),
+            });
+        }
+        if matches!(message.payload, Payload::Control(_)) {
+            return Err(Error::InvalidPluginMessage {
+                plugin: name.into(),
+                reason: "control payloads are reserved for host messages".into(),
+            });
+        }
+        message.source = name.to_string();
+    }
+    Ok(())
+}
+
+fn validate_stored_message(message: &Message) -> Result<()> {
+    if message.id.is_nil() {
+        return Err(Error::InvalidStoredMessage("id must not be nil".into()));
+    }
+    if message.source.trim().is_empty() {
+        return Err(Error::InvalidStoredMessage(
+            "source must not be empty".into(),
+        ));
+    }
+    if has_edge_whitespace(&message.source) {
+        return Err(Error::InvalidStoredMessage(
+            "source must not have leading or trailing whitespace".into(),
+        ));
+    }
+    if message.topic.trim().is_empty() {
+        return Err(Error::InvalidStoredMessage(
+            "topic must not be empty".into(),
+        ));
+    }
+    if has_edge_whitespace(&message.topic) {
+        return Err(Error::InvalidStoredMessage(
+            "topic must not have leading or trailing whitespace".into(),
+        ));
+    }
+    if matches!(message.payload, Payload::Control(_)) {
+        return Err(Error::InvalidStoredMessage(
+            "control payloads are reserved for host messages".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn plugin_error(name: &str, reason: String) -> Error {
+    if reason.trim().is_empty() {
+        return Error::InvalidPluginMessage {
+            plugin: name.into(),
+            reason: "error must not be empty".into(),
+        };
+    }
+    if has_edge_whitespace(&reason) {
+        return Error::InvalidPluginMessage {
+            plugin: name.into(),
+            reason: "error must not have leading or trailing whitespace".into(),
+        };
+    }
+    Error::PluginError {
+        plugin: name.into(),
+        reason,
+    }
+}
+
+fn validate_error_response(name: &str, response: &PluginResponse) -> Result<()> {
+    if response.error.is_some() && !response.messages.is_empty() {
+        return Err(Error::InvalidPluginMessage {
+            plugin: name.into(),
+            reason: "error response must not emit messages".into(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct QueuedMessage {
+    message: Message,
+    replayed: bool,
+}
+
+impl QueuedMessage {
+    fn replayed(message: Message) -> Self {
+        Self {
+            message,
+            replayed: true,
+        }
+    }
+}
+
+struct ProcessPlugin {
+    name: String,
+    command: PathBuf,
+    working_dir: Option<PathBuf>,
+    args: Vec<String>,
+    autostart: bool,
+    child: Mutex<Option<PluginChild>>,
+}
+
+impl ProcessPlugin {
+    fn new(config: PluginConfig) -> Result<Self> {
+        Ok(Self {
+            name: config.name,
+            command: config.command,
+            working_dir: config.working_dir,
+            args: config.args,
+            autostart: config.autostart,
+            child: Mutex::new(None),
+        })
+    }
+
+    fn call(&self, request: PluginRequest) -> Result<PluginResponse> {
+        let mut guard = self.lock_child()?;
+        if guard.is_none() {
+            *guard = Some(self.spawn()?);
+        }
+        let child = guard.as_mut().ok_or_else(|| Error::PluginState {
+            plugin: self.name.clone(),
+            reason: "child was not started".into(),
+        })?;
+        child.call(&self.name, request)
+    }
+
+    fn shutdown(&self, source: &str) -> Result<Option<PluginResponse>> {
+        let mut guard = self.lock_child()?;
+        let Some(child) = guard.take() else {
+            return Ok(None);
+        };
+        child.shutdown(&self.name, source)
+    }
+
+    fn lock_child(&self) -> Result<std::sync::MutexGuard<'_, Option<PluginChild>>> {
+        self.child.lock().map_err(|_| Error::PluginState {
+            plugin: self.name.clone(),
+            reason: "child lock poisoned".into(),
+        })
+    }
+
+    fn spawn(&self) -> Result<PluginChild> {
+        let mut command = Command::new(&self.command);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        if let Some(working_dir) = &self.working_dir {
+            command.current_dir(working_dir);
+        }
+        let mut child = command.spawn().map_err(|err| Error::PluginState {
+            plugin: self.name.clone(),
+            reason: format!("failed to spawn `{}`: {err}", self.command.display()),
+        })?;
+
+        let stdin = child.stdin.take().ok_or_else(|| Error::PluginState {
+            plugin: self.name.clone(),
+            reason: "missing piped stdin".into(),
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| Error::PluginState {
+            plugin: self.name.clone(),
+            reason: "missing piped stdout".into(),
+        })?;
+        Ok(PluginChild {
+            child,
+            stdin: BufWriter::new(stdin),
+            stdout: BufReader::new(stdout),
+        })
+    }
+}
+
+struct PluginChild {
+    child: Child,
+    stdin: BufWriter<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl PluginChild {
+    fn call(&mut self, name: &str, request: PluginRequest) -> Result<PluginResponse> {
+        match cubex_protocol::write_frame(&mut self.stdin, &request) {
+            Ok(()) => {}
+            Err(cubex_protocol::ProtocolError::Io(err))
+                if err.kind() == std::io::ErrorKind::BrokenPipe =>
+            {
+                return Err(Error::PluginExited { name: name.into() });
+            }
+            Err(err) => return Err(err.into()),
+        }
+        match cubex_protocol::read_frame(&mut self.stdout) {
+            Ok(Some(response)) => Ok(response),
+            Ok(None) => Err(Error::PluginExited { name: name.into() }),
+            Err(cubex_protocol::ProtocolError::Io(err))
+                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                Err(Error::PluginExited { name: name.into() })
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn shutdown(mut self, name: &str, source: &str) -> Result<Option<PluginResponse>> {
+        let stop = PluginRequest {
+            plugin: name.to_string(),
+            message: Message::new(source, "system.stop", Payload::Control(Control::Stop)),
+        };
+        let mut error = None;
+        let wrote_stop = match cubex_protocol::write_frame(&mut self.stdin, &stop) {
+            Ok(()) => true,
+            Err(cubex_protocol::ProtocolError::Io(err))
+                if err.kind() == std::io::ErrorKind::BrokenPipe =>
+            {
+                false
+            }
+            Err(err) => {
+                error = Some(err.into());
+                false
+            }
+        };
+        let response = if wrote_stop {
+            match cubex_protocol::read_frame::<_, PluginResponse>(&mut self.stdout) {
+                Ok(response) => response,
+                Err(err) => {
+                    error = Some(err.into());
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        drop(self.stdin);
+        let wait_result = self.child.wait();
+        if let Some(err) = error {
+            return Err(err);
+        }
+        match wait_result {
+            Ok(status) if status.success() => Ok(response),
+            Ok(status) => Err(Error::PluginState {
+                plugin: name.into(),
+                reason: format!("exited with {status}"),
+            }),
+            Err(err) => Err(Error::PluginState {
+                plugin: name.into(),
+                reason: format!("failed to wait for child: {err}"),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Config, EngineConfig, PluginConfig, RouteConfig, RouteValue, StoreConfig};
+    use cubex_protocol::{PayloadKind, Value};
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn route_matches_only_declared_fields() {
+        let route = RouteConfig {
+            name: "text-from-a".into(),
+            source: Some("a".into()),
+            topic: None,
+            payload: Some(PayloadKind::Text),
+            record: BTreeMap::new(),
+            to: vec!["b".into()],
+        };
+
+        assert!(route.matches(&Message::new("a", "topic", Payload::Text("ok".into()))));
+        assert!(!route.matches(&Message::new("b", "topic", Payload::Text("ok".into()))));
+        assert!(!route.matches(&Message::new("a", "topic", Payload::Bytes(vec![1]))));
+    }
+
+    #[test]
+    fn route_matches_declared_topic() {
+        let route = RouteConfig {
+            name: "topic-only".into(),
+            source: None,
+            topic: Some("wanted.topic".into()),
+            payload: None,
+            record: BTreeMap::new(),
+            to: vec!["b".into()],
+        };
+
+        assert!(route.matches(&Message::new(
+            "a",
+            "wanted.topic",
+            Payload::Text("ok".into())
+        )));
+        assert!(!route.matches(&Message::new(
+            "a",
+            "other.topic",
+            Payload::Text("ok".into())
+        )));
+    }
+
+    #[test]
+    fn route_matches_declared_record_fields() {
+        let route = RouteConfig {
+            name: "alice-records".into(),
+            source: None,
+            topic: Some("record.put".into()),
+            payload: Some(PayloadKind::Record),
+            record: BTreeMap::from([
+                ("user".into(), RouteValue::String("alice".into())),
+                ("priority".into(), RouteValue::I64(7)),
+                ("active".into(), RouteValue::Bool(true)),
+            ]),
+            to: vec!["policy".into()],
+        };
+        let matching_record = BTreeMap::from([
+            ("user".into(), Value::String("alice".into())),
+            ("priority".into(), Value::U64(7)),
+            ("active".into(), Value::Bool(true)),
+        ]);
+        let wrong_record = BTreeMap::from([
+            ("user".into(), Value::String("bob".into())),
+            ("priority".into(), Value::U64(7)),
+            ("active".into(), Value::Bool(true)),
+        ]);
+
+        assert!(route.matches(&Message::new(
+            "source",
+            "record.put",
+            Payload::Record(matching_record)
+        )));
+        assert!(!route.matches(&Message::new(
+            "source",
+            "record.put",
+            Payload::Record(wrong_record)
+        )));
+        assert!(!route.matches(&Message::new(
+            "source",
+            "record.put",
+            Payload::Text("alice".into())
+        )));
+    }
+
+    #[test]
+    fn config_parses_record_route_fields() {
+        let config: Config = toml::from_str(
+            r#"
+[[plugins]]
+name = "policy"
+command = "policy"
+
+[[routes]]
+name = "alice-records"
+payload = "record"
+record = { user = "alice", priority = 7, active = true }
+to = ["policy"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.routes[0].record,
+            BTreeMap::from([
+                ("user".into(), RouteValue::String("alice".into())),
+                ("priority".into(), RouteValue::I64(7)),
+                ("active".into(), RouteValue::Bool(true)),
+            ])
+        );
+    }
+
+    #[test]
+    fn record_route_requires_record_payload_filter() {
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: "bad-record-route".into(),
+                source: None,
+                topic: None,
+                payload: Some(PayloadKind::Text),
+                record: BTreeMap::from([("user".into(), RouteValue::String("alice".into()))]),
+                to: vec!["print".into()],
+            }],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message))
+                if message == "route `bad-record-route` record match requires payload `record` or no payload filter"
+        ));
+    }
+
+    #[test]
+    fn plugin_error_reason_must_be_readable() {
+        assert!(matches!(
+            plugin_error("bad", "".into()),
+            Error::InvalidPluginMessage { plugin, reason }
+                if plugin == "bad" && reason == "error must not be empty"
+        ));
+        assert!(matches!(
+            plugin_error("bad", " boom".into()),
+            Error::InvalidPluginMessage { plugin, reason }
+                if plugin == "bad" && reason == "error must not have leading or trailing whitespace"
+        ));
+        assert!(matches!(
+            plugin_error("bad", "boom".into()),
+            Error::PluginError { plugin, reason } if plugin == "bad" && reason == "boom"
+        ));
+    }
+
+    #[test]
+    fn error_response_must_not_emit_messages() {
+        let response = PluginResponse {
+            messages: vec![Message::new("bad", "late", Payload::Text("ignored".into()))],
+            logs: Vec::new(),
+            error: Some("boom".into()),
+        };
+
+        assert!(matches!(
+            validate_error_response("bad", &response),
+            Err(Error::InvalidPluginMessage { plugin, reason })
+                if plugin == "bad" && reason == "error response must not emit messages"
+        ));
+    }
+
+    #[test]
+    fn emitted_topics_must_not_be_empty() {
+        let mut messages = vec![Message::new("plugin", " ", Payload::Text("bad".into()))];
+
+        assert!(matches!(
+            normalize_plugin_messages("plugin", &mut messages),
+            Err(Error::InvalidPluginMessage { plugin, reason })
+                if plugin == "plugin" && reason == "topic must not be empty"
+        ));
+    }
+
+    #[test]
+    fn emitted_topics_must_not_have_edge_whitespace() {
+        let mut messages = vec![Message::new(
+            "plugin",
+            " topic",
+            Payload::Text("bad".into()),
+        )];
+
+        assert!(matches!(
+            normalize_plugin_messages("plugin", &mut messages),
+            Err(Error::InvalidPluginMessage { plugin, reason })
+                if plugin == "plugin" && reason == "topic must not have leading or trailing whitespace"
+        ));
+    }
+
+    #[test]
+    fn emitted_messages_must_not_be_control_payloads() {
+        let mut messages = vec![Message::new(
+            "plugin",
+            "system.stop",
+            Payload::Control(Control::Stop),
+        )];
+
+        assert!(matches!(
+            normalize_plugin_messages("plugin", &mut messages),
+            Err(Error::InvalidPluginMessage { plugin, reason })
+                if plugin == "plugin" && reason == "control payloads are reserved for host messages"
+        ));
+    }
+
+    #[test]
+    fn emitted_message_ids_must_not_be_nil() {
+        let mut messages = vec![Message {
+            id: uuid::Uuid::nil(),
+            source: "plugin".into(),
+            topic: "topic".into(),
+            payload: Payload::Text("bad".into()),
+        }];
+
+        assert!(matches!(
+            normalize_plugin_messages("plugin", &mut messages),
+            Err(Error::InvalidPluginMessage { plugin, reason })
+                if plugin == "plugin" && reason == "id must not be nil"
+        ));
+    }
+
+    #[test]
+    fn duplicate_plugin_names_are_rejected() {
+        let config = Config {
+            plugins: vec![plugin("print"), plugin("print")],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::DuplicatePlugin(name)) if name == "print"
+        ));
+    }
+
+    #[test]
+    fn plugin_name_must_not_match_engine_name() {
+        let config = Config {
+            engine: EngineConfig {
+                name: "runtime".into(),
+                max_messages: 32,
+            },
+            plugins: vec![plugin("runtime")],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message)) if message == "plugin `runtime` must not use engine.name"
+        ));
+    }
+
+    #[test]
+    fn empty_names_are_rejected() {
+        let config = Config {
+            engine: EngineConfig {
+                name: " ".into(),
+                max_messages: 32,
+            },
+            ..Config::default()
+        };
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(_))
+        ));
+
+        let config = Config {
+            plugins: vec![plugin(" ")],
+            ..Config::default()
+        };
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(_))
+        ));
+
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: " ".into(),
+                source: None,
+                topic: None,
+                payload: None,
+                record: BTreeMap::new(),
+                to: vec!["print".into()],
+            }],
+            ..Config::default()
+        };
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn identity_fields_must_not_have_edge_whitespace() {
+        for config in [
+            Config {
+                engine: EngineConfig {
+                    name: " cubex".into(),
+                    max_messages: 32,
+                },
+                ..Config::default()
+            },
+            Config {
+                plugins: vec![plugin(" print")],
+                ..Config::default()
+            },
+            Config {
+                plugins: vec![plugin("print")],
+                routes: vec![RouteConfig {
+                    name: " route".into(),
+                    source: None,
+                    topic: None,
+                    payload: None,
+                    record: BTreeMap::new(),
+                    to: vec!["print".into()],
+                }],
+                ..Config::default()
+            },
+            Config {
+                plugins: vec![plugin("print")],
+                routes: vec![RouteConfig {
+                    name: "bad-source".into(),
+                    source: Some(" print".into()),
+                    topic: None,
+                    payload: None,
+                    record: BTreeMap::new(),
+                    to: vec!["print".into()],
+                }],
+                ..Config::default()
+            },
+            Config {
+                plugins: vec![plugin("print")],
+                routes: vec![RouteConfig {
+                    name: "bad-topic".into(),
+                    source: None,
+                    topic: Some(" topic".into()),
+                    payload: None,
+                    record: BTreeMap::new(),
+                    to: vec!["print".into()],
+                }],
+                ..Config::default()
+            },
+            Config {
+                plugins: vec![plugin("print")],
+                routes: vec![RouteConfig {
+                    name: "bad-target".into(),
+                    source: None,
+                    topic: None,
+                    payload: None,
+                    record: BTreeMap::new(),
+                    to: vec![" print".into()],
+                }],
+                ..Config::default()
+            },
+            Config {
+                plugins: vec![plugin("print")],
+                routes: vec![RouteConfig {
+                    name: "bad-record-key".into(),
+                    source: None,
+                    topic: None,
+                    payload: Some(PayloadKind::Record),
+                    record: BTreeMap::from([(" user".into(), RouteValue::String("alice".into()))]),
+                    to: vec!["print".into()],
+                }],
+                ..Config::default()
+            },
+        ] {
+            assert!(matches!(
+                Engine::from_config(config),
+                Err(Error::InvalidConfig(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn zero_message_limit_is_rejected() {
+        let config = Config {
+            engine: EngineConfig {
+                name: "test".into(),
+                max_messages: 0,
+            },
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn replay_requires_store_path() {
+        let config = Config {
+            store: StoreConfig {
+                path: None,
+                replay_on_start: true,
+            },
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message)) if message == "store.replay_on_start requires store.path"
+        ));
+    }
+
+    #[test]
+    fn replay_rejects_control_payloads() {
+        let path =
+            std::env::temp_dir().join(format!("cubex-replay-control-{}.bin", uuid::Uuid::new_v4()));
+        write_event(
+            &path,
+            &Message::new("stored", "system.stop", Payload::Control(Control::Stop)),
+        );
+
+        let engine = Engine::from_config(Config {
+            store: StoreConfig {
+                path: Some(path.clone()),
+                replay_on_start: true,
+            },
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(matches!(
+            engine.run(),
+            Err(Error::Store(cubex_store::StoreError::InvalidEventMessage(reason)))
+                if reason == "control payloads are reserved for host messages"
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn replay_rejects_unknown_sources() {
+        let path =
+            std::env::temp_dir().join(format!("cubex-replay-source-{}.bin", uuid::Uuid::new_v4()));
+        EventLog::new(&path)
+            .append(&Message::new(
+                "missing-plugin",
+                "stored.topic",
+                Payload::Text("stored".into()),
+            ))
+            .unwrap();
+
+        let engine = Engine::from_config(Config {
+            store: StoreConfig {
+                path: Some(path.clone()),
+                replay_on_start: true,
+            },
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(matches!(
+            engine.run(),
+            Err(Error::InvalidStoredMessage(reason))
+                if reason == "source `missing-plugin` is not configured"
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn replay_rejects_nil_message_ids() {
+        let path =
+            std::env::temp_dir().join(format!("cubex-replay-nil-id-{}.bin", uuid::Uuid::new_v4()));
+        write_event(
+            &path,
+            &Message {
+                id: uuid::Uuid::nil(),
+                source: "cubex".into(),
+                topic: "stored.topic".into(),
+                payload: Payload::Text("stored".into()),
+            },
+        );
+
+        let engine = Engine::from_config(Config {
+            store: StoreConfig {
+                path: Some(path.clone()),
+                replay_on_start: true,
+            },
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(matches!(
+            engine.run(),
+            Err(Error::Store(cubex_store::StoreError::InvalidEventMessage(reason)))
+                if reason == "id must not be nil"
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_store_path_is_rejected() {
+        let mut config = Config {
+            store: StoreConfig {
+                path: Some(PathBuf::new()),
+                replay_on_start: false,
+            },
+            ..Config::default()
+        };
+        config.resolve_relative_paths(Path::new("/tmp"));
+
+        assert!(config.store.path.as_ref().unwrap().as_os_str().is_empty());
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message)) if message == "store.path must not be empty"
+        ));
+    }
+
+    #[test]
+    fn blank_store_path_is_rejected() {
+        let config = Config {
+            store: StoreConfig {
+                path: Some(PathBuf::from(" ")),
+                replay_on_start: false,
+            },
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message)) if message == "store.path must not be blank"
+        ));
+    }
+
+    #[test]
+    fn empty_plugin_command_is_rejected() {
+        let mut plugin = plugin("print");
+        plugin.command = PathBuf::new();
+        let config = Config {
+            plugins: vec![plugin],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn blank_plugin_command_is_rejected() {
+        let mut plugin = plugin("print");
+        plugin.command = PathBuf::from(" ");
+        let config = Config {
+            plugins: vec![plugin],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message)) if message == "plugin.command must not be blank"
+        ));
+    }
+
+    #[test]
+    fn path_resolution_preserves_empty_plugin_command() {
+        let mut config = Config {
+            plugins: vec![plugin("print")],
+            ..Config::default()
+        };
+        config.plugins[0].command = PathBuf::new();
+        config.resolve_relative_paths(Path::new("/tmp"));
+
+        assert!(config.plugins[0].command.as_os_str().is_empty());
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn empty_working_dir_is_rejected() {
+        let mut config = Config {
+            plugins: vec![plugin("print")],
+            ..Config::default()
+        };
+        config.plugins[0].working_dir = Some(PathBuf::new());
+        config.resolve_relative_paths(Path::new("/tmp"));
+
+        assert!(
+            config.plugins[0]
+                .working_dir
+                .as_ref()
+                .unwrap()
+                .as_os_str()
+                .is_empty()
+        );
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message)) if message == "plugin.working_dir must not be empty"
+        ));
+    }
+
+    #[test]
+    fn blank_working_dir_is_rejected() {
+        let mut config = Config {
+            plugins: vec![plugin("print")],
+            ..Config::default()
+        };
+        config.plugins[0].working_dir = Some(PathBuf::from(" "));
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message)) if message == "plugin.working_dir must not be blank"
+        ));
+    }
+
+    #[test]
+    fn path_resolution_preserves_blank_paths_for_validation() {
+        let mut config = Config {
+            store: StoreConfig {
+                path: Some(PathBuf::from(" ")),
+                replay_on_start: false,
+            },
+            plugins: vec![PluginConfig {
+                name: "print".into(),
+                command: PathBuf::from(" "),
+                working_dir: Some(PathBuf::from(" ")),
+                args: Vec::new(),
+                autostart: false,
+            }],
+            ..Config::default()
+        };
+
+        config.resolve_relative_paths(Path::new("/tmp"));
+
+        assert_eq!(config.store.path.as_deref(), Some(Path::new(" ")));
+        assert_eq!(config.plugins[0].command, PathBuf::from(" "));
+        assert_eq!(config.plugins[0].working_dir, Some(PathBuf::from(" ")));
+    }
+
+    #[test]
+    fn config_file_resolves_relative_paths_from_its_directory() {
+        let dir = std::env::temp_dir().join(format!("cubex-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("cubex.toml");
+        std::fs::write(
+            &path,
+            r#"
+[store]
+path = "events.bin"
+
+[[plugins]]
+name = "plugin"
+command = "bin/plugin"
+working_dir = "work"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::from_file(&path).unwrap();
+
+        assert_eq!(
+            config.store.path.as_deref(),
+            Some(dir.join("events.bin").as_path())
+        );
+        assert_eq!(config.plugins[0].command, dir.join("bin/plugin"));
+        assert_eq!(
+            config.plugins[0].working_dir.as_deref(),
+            Some(dir.join("work").as_path())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unknown_config_fields_are_rejected() {
+        for text in [
+            "unexpected = true",
+            "[engine]\nname = \"test\"\nunexpected = true",
+            "[store]\npath = \"events.bin\"\nunexpected = true",
+            "[[plugins]]\nname = \"plugin\"\ncommand = \"bin/plugin\"\nunexpected = true",
+            "[[routes]]\nname = \"route\"\nto = [\"plugin\"]\nunexpected = true",
+        ] {
+            assert!(toml::from_str::<Config>(text).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_route_payload_kind_is_rejected() {
+        let text = r#"
+[[routes]]
+name = "route"
+payload = "json"
+to = ["plugin"]
+"#;
+
+        assert!(toml::from_str::<Config>(text).is_err());
+    }
+
+    #[test]
+    fn duplicate_route_names_are_rejected() {
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![
+                RouteConfig {
+                    name: "same".into(),
+                    source: None,
+                    topic: None,
+                    payload: None,
+                    record: BTreeMap::new(),
+                    to: vec!["print".into()],
+                },
+                RouteConfig {
+                    name: "same".into(),
+                    source: None,
+                    topic: None,
+                    payload: None,
+                    record: BTreeMap::new(),
+                    to: vec!["print".into()],
+                },
+            ],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn route_targets_must_exist() {
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: "bad-route".into(),
+                source: None,
+                topic: None,
+                payload: None,
+                record: BTreeMap::new(),
+                to: vec!["missing".into()],
+            }],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::UnknownRouteTarget { route, target })
+                if route == "bad-route" && target == "missing"
+        ));
+    }
+
+    #[test]
+    fn route_targets_must_not_be_empty() {
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: "bad-target".into(),
+                source: None,
+                topic: None,
+                payload: None,
+                record: BTreeMap::new(),
+                to: vec![" ".into()],
+            }],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_route_targets_are_rejected() {
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: "dupe-target".into(),
+                source: None,
+                topic: None,
+                payload: None,
+                record: BTreeMap::new(),
+                to: vec!["print".into(), "print".into()],
+            }],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn route_sources_must_exist() {
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: "bad-source".into(),
+                source: Some("missing".into()),
+                topic: None,
+                payload: None,
+                record: BTreeMap::new(),
+                to: vec!["print".into()],
+            }],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::UnknownRouteSource { route, source_name })
+                if route == "bad-source" && source_name == "missing"
+        ));
+    }
+
+    #[test]
+    fn route_source_must_not_be_empty() {
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: "bad-source".into(),
+                source: Some(" ".into()),
+                topic: None,
+                payload: None,
+                record: BTreeMap::new(),
+                to: vec!["print".into()],
+            }],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message)) if message == "route `bad-source` source must not be empty"
+        ));
+    }
+
+    #[test]
+    fn route_topic_must_not_be_empty() {
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: "bad-topic".into(),
+                source: None,
+                topic: Some(" ".into()),
+                payload: None,
+                record: BTreeMap::new(),
+                to: vec!["print".into()],
+            }],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message)) if message == "route `bad-topic` topic must not be empty"
+        ));
+    }
+
+    #[test]
+    fn route_source_can_be_engine_name() {
+        let config = Config {
+            engine: EngineConfig {
+                name: "engine".into(),
+                max_messages: 32,
+            },
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: "engine-source".into(),
+                source: Some("engine".into()),
+                topic: None,
+                payload: None,
+                record: BTreeMap::new(),
+                to: vec!["print".into()],
+            }],
+            ..Config::default()
+        };
+
+        assert!(Engine::from_config(config).is_ok());
+    }
+
+    #[test]
+    fn routes_need_at_least_one_target() {
+        let config = Config {
+            plugins: vec![plugin("print")],
+            routes: vec![RouteConfig {
+                name: "empty-route".into(),
+                source: None,
+                topic: None,
+                payload: None,
+                record: BTreeMap::new(),
+                to: Vec::new(),
+            }],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::EmptyRouteTargets(name)) if name == "empty-route"
+        ));
+    }
+
+    #[test]
+    fn poisoned_plugin_child_lock_is_error() {
+        let plugin = ProcessPlugin::new(plugin("poisoned")).unwrap();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = plugin.child.lock().unwrap();
+            panic!("poison child lock");
+        }));
+        assert!(panic.is_err());
+
+        let request = PluginRequest {
+            plugin: "poisoned".into(),
+            message: Message::new("test", "topic", Payload::Text("x".into())),
+        };
+
+        assert!(matches!(
+            plugin.call(request),
+            Err(Error::PluginState { plugin, reason })
+                if plugin == "poisoned" && reason == "child lock poisoned"
+        ));
+    }
+
+    #[test]
+    fn spawn_error_names_plugin() {
+        let mut config = plugin("missing-command");
+        config.command = PathBuf::from("/definitely/not/a/cubex/plugin");
+        let plugin = ProcessPlugin::new(config).unwrap();
+        let request = PluginRequest {
+            plugin: "missing-command".into(),
+            message: Message::new("test", "topic", Payload::Text("x".into())),
+        };
+
+        assert!(matches!(
+            plugin.call(request),
+            Err(Error::PluginState { plugin, reason })
+                if plugin == "missing-command" && reason.contains("failed to spawn")
+        ));
+    }
+
+    #[test]
+    fn run_keeps_primary_error_after_cleanup() {
+        let path = std::env::temp_dir().join(format!("cubex-test-{}.bin", uuid::Uuid::new_v4()));
+        let store = EventLog::new(&path);
+        store
+            .append(&Message::new("test", "topic", Payload::Text("x".into())))
+            .unwrap();
+        store
+            .append(&Message::new("test", "topic", Payload::Text("y".into())))
+            .unwrap();
+
+        let engine = Engine::from_config(Config {
+            engine: EngineConfig {
+                name: "test".into(),
+                max_messages: 1,
+            },
+            store: StoreConfig {
+                path: Some(path.clone()),
+                replay_on_start: true,
+            },
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(matches!(engine.run(), Err(Error::MessageLimit(1))));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn run_reports_cleanup_error_when_main_run_succeeds() {
+        let engine = Engine::from_config(Config {
+            plugins: vec![plugin("poisoned")],
+            ..Config::default()
+        })
+        .unwrap();
+        let plugin = engine.plugins.get("poisoned").unwrap();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = plugin.child.lock().unwrap();
+            panic!("poison child lock");
+        }));
+        assert!(panic.is_err());
+
+        assert!(matches!(
+            engine.run(),
+            Err(Error::PluginState { plugin, reason })
+                if plugin == "poisoned" && reason == "child lock poisoned"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_reads_and_validates_stop_response() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("cubex-plugin-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let start_response_path = dir.join("start-response.bin");
+        let bad_response_path = dir.join("bad-response.bin");
+        let stopped_path = dir.join("stopped.txt");
+        let script_path = dir.join("plugin.sh");
+
+        let mut start_response_file = std::fs::File::create(&start_response_path).unwrap();
+        cubex_protocol::write_frame(&mut start_response_file, &PluginResponse::default()).unwrap();
+        std::fs::write(&bad_response_path, [1_u8, 0, 0, 0, 0]).unwrap();
+
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        script
+            .write_all(
+                b"#!/bin/sh\ncat >/dev/null &\ncat \"$(dirname \"$0\")/start-response.bin\"\ncat \"$(dirname \"$0\")/bad-response.bin\"\nwait\nsleep 0.2\nprintf done > \"$(dirname \"$0\")/stopped.txt\"\n",
+            )
+            .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let engine = Engine::from_config(Config {
+            plugins: vec![PluginConfig {
+                name: "bad-stop".into(),
+                command: script_path,
+                working_dir: None,
+                args: Vec::new(),
+                autostart: true,
+            }],
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(matches!(
+            engine.run(),
+            Err(Error::Protocol(cubex_protocol::ProtocolError::Codec(_)))
+        ));
+        assert_eq!(std::fs::read_to_string(stopped_path).unwrap(), "done");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_continues_after_plugin_stop_error() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "cubex-plugin-stop-continue-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let start_response_path = dir.join("start-response.bin");
+        let good_stop_response_path = dir.join("good-stop-response.bin");
+        let bad_response_path = dir.join("bad-response.bin");
+        let good_script_path = dir.join("good-plugin.sh");
+        let bad_script_path = dir.join("bad-plugin.sh");
+
+        let mut start_response_file = std::fs::File::create(&start_response_path).unwrap();
+        cubex_protocol::write_frame(&mut start_response_file, &PluginResponse::default()).unwrap();
+        let mut good_stop_response_file = std::fs::File::create(&good_stop_response_path).unwrap();
+        cubex_protocol::write_frame(
+            &mut good_stop_response_file,
+            &PluginResponse {
+                messages: Vec::new(),
+                logs: vec!["good stopped".into()],
+                error: None,
+            },
+        )
+        .unwrap();
+        std::fs::write(&bad_response_path, [1_u8, 0, 0, 0, 0]).unwrap();
+
+        let mut good_script = std::fs::File::create(&good_script_path).unwrap();
+        good_script
+            .write_all(
+                b"#!/bin/sh\ncat >/dev/null &\ncat \"$(dirname \"$0\")/start-response.bin\"\ncat \"$(dirname \"$0\")/good-stop-response.bin\"\nwait\n",
+            )
+            .unwrap();
+        let mut bad_script = std::fs::File::create(&bad_script_path).unwrap();
+        bad_script
+            .write_all(
+                b"#!/bin/sh\ncat >/dev/null &\ncat \"$(dirname \"$0\")/start-response.bin\"\ncat \"$(dirname \"$0\")/bad-response.bin\"\nwait\n",
+            )
+            .unwrap();
+        for path in [&good_script_path, &bad_script_path] {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+
+        let engine = Engine::from_config(Config {
+            plugins: vec![
+                PluginConfig {
+                    name: "good-stop".into(),
+                    command: good_script_path,
+                    working_dir: None,
+                    args: Vec::new(),
+                    autostart: true,
+                },
+                PluginConfig {
+                    name: "bad-stop".into(),
+                    command: bad_script_path,
+                    working_dir: None,
+                    args: Vec::new(),
+                    autostart: true,
+                },
+            ],
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(matches!(
+            engine.run(),
+            Err(Error::Protocol(cubex_protocol::ProtocolError::Codec(_)))
+        ));
+        assert!(
+            engine
+                .plugins
+                .get("good-stop")
+                .unwrap()
+                .child
+                .lock()
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_logs_are_reported() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("cubex-plugin-stop-log-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let start_response_path = dir.join("start-response.bin");
+        let stop_response_path = dir.join("stop-response.bin");
+        let script_path = dir.join("plugin.sh");
+
+        let mut start_response_file = std::fs::File::create(&start_response_path).unwrap();
+        cubex_protocol::write_frame(&mut start_response_file, &PluginResponse::default()).unwrap();
+        let mut stop_response_file = std::fs::File::create(&stop_response_path).unwrap();
+        cubex_protocol::write_frame(
+            &mut stop_response_file,
+            &PluginResponse {
+                messages: Vec::new(),
+                logs: vec!["stopped cleanly".into()],
+                error: None,
+            },
+        )
+        .unwrap();
+
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        script
+            .write_all(
+                b"#!/bin/sh\ncat >/dev/null &\ncat \"$(dirname \"$0\")/start-response.bin\"\ncat \"$(dirname \"$0\")/stop-response.bin\"\nwait\n",
+            )
+            .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let engine = Engine::from_config(Config {
+            plugins: vec![PluginConfig {
+                name: "stop-log".into(),
+                command: script_path,
+                working_dir: None,
+                args: Vec::new(),
+                autostart: true,
+            }],
+            ..Config::default()
+        })
+        .unwrap();
+
+        let report = engine.run().unwrap();
+        assert_eq!(report.logs, vec!["stopped cleanly"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_rejects_nonzero_exit_status() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("cubex-plugin-stop-exit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let start_response_path = dir.join("start-response.bin");
+        let stop_response_path = dir.join("stop-response.bin");
+        let script_path = dir.join("plugin.sh");
+
+        let mut start_response_file = std::fs::File::create(&start_response_path).unwrap();
+        cubex_protocol::write_frame(&mut start_response_file, &PluginResponse::default()).unwrap();
+        let mut stop_response_file = std::fs::File::create(&stop_response_path).unwrap();
+        cubex_protocol::write_frame(&mut stop_response_file, &PluginResponse::default()).unwrap();
+
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        script
+            .write_all(
+                b"#!/bin/sh\ncat >/dev/null &\ncat \"$(dirname \"$0\")/start-response.bin\"\ncat \"$(dirname \"$0\")/stop-response.bin\"\nwait\nexit 7\n",
+            )
+            .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let engine = Engine::from_config(Config {
+            plugins: vec![PluginConfig {
+                name: "bad-exit".into(),
+                command: script_path,
+                working_dir: None,
+                args: Vec::new(),
+                autostart: true,
+            }],
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(matches!(
+            engine.run(),
+            Err(Error::PluginState { plugin, reason })
+                if plugin == "bad-exit" && reason.contains("exited with")
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_rejects_emitted_messages() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "cubex-plugin-stop-message-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let start_response_path = dir.join("start-response.bin");
+        let stop_response_path = dir.join("stop-response.bin");
+        let script_path = dir.join("plugin.sh");
+
+        let mut start_response_file = std::fs::File::create(&start_response_path).unwrap();
+        cubex_protocol::write_frame(&mut start_response_file, &PluginResponse::default()).unwrap();
+        let mut stop_response_file = std::fs::File::create(&stop_response_path).unwrap();
+        cubex_protocol::write_frame(
+            &mut stop_response_file,
+            &PluginResponse {
+                messages: vec![Message::new(
+                    "ignored",
+                    "late.topic",
+                    Payload::Text("late".into()),
+                )],
+                logs: Vec::new(),
+                error: None,
+            },
+        )
+        .unwrap();
+
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        script
+            .write_all(
+                b"#!/bin/sh\ncat >/dev/null &\ncat \"$(dirname \"$0\")/start-response.bin\"\ncat \"$(dirname \"$0\")/stop-response.bin\"\nwait\n",
+            )
+            .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let engine = Engine::from_config(Config {
+            plugins: vec![PluginConfig {
+                name: "late-plugin".into(),
+                command: script_path,
+                working_dir: None,
+                args: Vec::new(),
+                autostart: true,
+            }],
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(matches!(
+            engine.run(),
+            Err(Error::InvalidPluginMessage { plugin, reason })
+                if plugin == "late-plugin"
+                    && reason == "system.stop response must not emit messages"
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_error_responses_fail_the_run() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("cubex-plugin-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let error_response_path = dir.join("error-response.bin");
+        let stop_response_path = dir.join("stop-response.bin");
+        let script_path = dir.join("plugin.sh");
+
+        let mut error_response_file = std::fs::File::create(&error_response_path).unwrap();
+        cubex_protocol::write_frame(
+            &mut error_response_file,
+            &PluginResponse {
+                messages: Vec::new(),
+                logs: Vec::new(),
+                error: Some("boom".into()),
+            },
+        )
+        .unwrap();
+        let mut stop_response_file = std::fs::File::create(&stop_response_path).unwrap();
+        cubex_protocol::write_frame(&mut stop_response_file, &PluginResponse::default()).unwrap();
+
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        script
+            .write_all(
+                b"#!/bin/sh\ncat >/dev/null &\ncat \"$(dirname \"$0\")/error-response.bin\"\ncat \"$(dirname \"$0\")/stop-response.bin\"\nwait\n",
+            )
+            .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let engine = Engine::from_config(Config {
+            plugins: vec![PluginConfig {
+                name: "bad-plugin".into(),
+                command: script_path,
+                working_dir: None,
+                args: Vec::new(),
+                autostart: true,
+            }],
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(matches!(
+            engine.run(),
+            Err(Error::PluginError { plugin, reason })
+                if plugin == "bad-plugin" && reason == "boom"
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_start_and_derived_messages_are_not_persisted() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("cubex-replay-derived-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let log_path = dir.join("events.bin");
+        let start_response_path = dir.join("start-response.bin");
+        let response_path = dir.join("response.bin");
+        let script_path = dir.join("plugin.sh");
+
+        let log = EventLog::new(&log_path);
+        log.append(&Message::new(
+            "seed",
+            "seed.topic",
+            Payload::Text("one".into()),
+        ))
+        .unwrap();
+
+        let start_response = PluginResponse {
+            messages: vec![Message::new(
+                "ignored",
+                "started.topic",
+                Payload::Text("start".into()),
+            )],
+            logs: Vec::new(),
+            error: None,
+        };
+        let mut start_response_file = std::fs::File::create(&start_response_path).unwrap();
+        cubex_protocol::write_frame(&mut start_response_file, &start_response).unwrap();
+
+        let response = PluginResponse {
+            messages: vec![Message::new(
+                "ignored",
+                "derived.topic",
+                Payload::Text("two".into()),
+            )],
+            logs: Vec::new(),
+            error: None,
+        };
+        let mut response_file = std::fs::File::create(&response_path).unwrap();
+        cubex_protocol::write_frame(&mut response_file, &response).unwrap();
+
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        script
+            .write_all(
+                b"#!/bin/sh\ncat >/dev/null &\ncat \"$(dirname \"$0\")/start-response.bin\"\ncat \"$(dirname \"$0\")/response.bin\"\nwait\n",
+            )
+            .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let engine = Engine::from_config(Config {
+            engine: EngineConfig {
+                name: "test".into(),
+                max_messages: 8,
+            },
+            store: StoreConfig {
+                path: Some(log_path.clone()),
+                replay_on_start: true,
+            },
+            plugins: vec![
+                plugin("seed"),
+                PluginConfig {
+                    name: "deriver".into(),
+                    command: script_path,
+                    working_dir: None,
+                    args: Vec::new(),
+                    autostart: false,
+                },
+            ],
+            routes: vec![RouteConfig {
+                name: "seed-to-deriver".into(),
+                source: Some("seed".into()),
+                topic: Some("seed.topic".into()),
+                payload: Some(PayloadKind::Text),
+                record: BTreeMap::new(),
+                to: vec!["deriver".into()],
+            }],
+        })
+        .unwrap();
+
+        let report = engine.run().unwrap();
+        assert_eq!(report.replayed, 1);
+        assert_eq!(EventLog::new(&log_path).read_all().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_pipe_from_exited_plugin_is_plugin_exited() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("cubex-plugin-exit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let script_path = dir.join("plugin.sh");
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        script.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let plugin = ProcessPlugin::new(PluginConfig {
+            name: "dead-plugin".into(),
+            command: script_path,
+            working_dir: None,
+            args: Vec::new(),
+            autostart: false,
+        })
+        .unwrap();
+        let mut child = plugin.spawn().unwrap();
+        let _ = child.child.wait();
+        let error = child
+            .call(
+                "dead-plugin",
+                PluginRequest {
+                    plugin: "dead-plugin".into(),
+                    message: Message::new("test", "topic", Payload::Text("x".into())),
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, Error::PluginExited { name } if name == "dead-plugin"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_response_from_exited_plugin_is_plugin_exited() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("cubex-plugin-partial-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let script_path = dir.join("plugin.sh");
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        script
+            .write_all(b"#!/bin/sh\ncat >/dev/null &\nprintf '\\001\\000'\nwait\n")
+            .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let plugin = ProcessPlugin::new(PluginConfig {
+            name: "partial-plugin".into(),
+            command: script_path,
+            working_dir: None,
+            args: Vec::new(),
+            autostart: false,
+        })
+        .unwrap();
+        let error = plugin
+            .call(PluginRequest {
+                plugin: "partial-plugin".into(),
+                message: Message::new("test", "topic", Payload::Text("x".into())),
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, Error::PluginExited { name } if name == "partial-plugin"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn emitted_sources_are_host_assigned() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("cubex-plugin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let response_path = dir.join("response.bin");
+        let script_path = dir.join("plugin.sh");
+
+        let response = PluginResponse {
+            messages: vec![Message::new(
+                "spoofed-source",
+                "spoofed.topic",
+                Payload::Text("payload".into()),
+            )],
+            logs: Vec::new(),
+            error: None,
+        };
+        let mut response_file = std::fs::File::create(&response_path).unwrap();
+        cubex_protocol::write_frame(&mut response_file, &response).unwrap();
+
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        script
+            .write_all(
+                b"#!/bin/sh\ncat >/dev/null &\ncat \"$(dirname \"$0\")/response.bin\"\nwait\n",
+            )
+            .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let engine = Engine::from_config(Config {
+            engine: EngineConfig {
+                name: "test".into(),
+                max_messages: 8,
+            },
+            plugins: vec![PluginConfig {
+                name: "actual-plugin".into(),
+                command: script_path,
+                working_dir: None,
+                args: Vec::new(),
+                autostart: true,
+            }],
+            ..Config::default()
+        })
+        .unwrap();
+
+        let report = engine.run().unwrap();
+        assert_eq!(report.emitted[0].source, "actual-plugin");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn plugin(name: &str) -> PluginConfig {
+        PluginConfig {
+            name: name.into(),
+            command: "unused".into(),
+            working_dir: None,
+            args: Vec::new(),
+            autostart: false,
+        }
+    }
+
+    fn write_event(path: &Path, message: &Message) {
+        let mut file = std::fs::File::create(path).unwrap();
+        cubex_protocol::write_frame(&mut file, message).unwrap();
+    }
+}

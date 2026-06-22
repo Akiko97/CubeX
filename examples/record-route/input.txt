@@ -1,0 +1,4 @@
+user=alice
+priority=7
+active=true
+message=from record file

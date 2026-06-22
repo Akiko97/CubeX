@@ -1,0 +1,31 @@
+[engine]
+name = "hello-example"
+max_messages = 32
+
+[[plugins]]
+name = "hello"
+command = "../../target/debug/cubex-hello-plugin"
+args = ["CubeX"]
+autostart = true
+
+[[plugins]]
+name = "echo"
+command = "../../target/debug/cubex-echo-plugin"
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "greeting-to-echo-and-print"
+source = "hello"
+topic = "hello.greeting"
+payload = "text"
+to = ["echo", "print"]
+
+[[routes]]
+name = "echo-to-print"
+source = "echo"
+topic = "echo.reply"
+payload = "text"
+to = ["print"]

@@ -1,0 +1,9 @@
+[package]
+name = "cubex-example-plugin"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cubex-plugin-sdk = { path = "../../crates/cubex-plugin-sdk" }

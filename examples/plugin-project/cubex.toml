@@ -1,0 +1,20 @@
+[engine]
+name = "plugin-project-example"
+max_messages = 32
+
+[[plugins]]
+name = "example"
+command = "../../target/debug/cubex-example-plugin"
+args = ["hello from a real plugin project"]
+autostart = true
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "example-to-print"
+source = "example"
+topic = "example.ready"
+payload = "text"
+to = ["print"]

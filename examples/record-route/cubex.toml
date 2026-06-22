@@ -1,0 +1,22 @@
+[engine]
+name = "record-route-example"
+max_messages = 16
+
+[[plugins]]
+name = "record-file"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["input.txt", "record.put", "record-typed"]
+autostart = true
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "alice-records-to-print"
+source = "record-file"
+topic = "record.put"
+payload = "record"
+record = { user = "alice", priority = 7, active = true }
+to = ["print"]

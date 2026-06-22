@@ -1,0 +1,45 @@
+[engine]
+name = "bytes-flow-example"
+max_messages = 32
+
+[[plugins]]
+name = "file-source"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["input.bin", "file.bytes", "bytes"]
+autostart = true
+
+[[plugins]]
+name = "file-sink"
+command = "../../target/debug/cubex-file-sink-plugin"
+working_dir = "."
+args = ["output.bin"]
+
+[[plugins]]
+name = "echo"
+command = "../../target/debug/cubex-echo-plugin"
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "bytes-to-echo"
+source = "file-source"
+topic = "file.bytes"
+payload = "bytes"
+to = ["echo"]
+
+[[routes]]
+name = "echo-to-sink"
+source = "echo"
+topic = "echo.reply"
+payload = "bytes"
+to = ["file-sink"]
+
+[[routes]]
+name = "sink-ack-to-print"
+source = "file-sink"
+topic = "file.written"
+payload = "text"
+to = ["print"]

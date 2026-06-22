@@ -1,0 +1,53 @@
+[engine]
+name = "access-control-example"
+max_messages = 32
+
+[[plugins]]
+name = "access-policy"
+command = "../../target/debug/cubex-access-policy-plugin"
+args = ["alice=record.put"]
+autostart = true
+
+[[plugins]]
+name = "record-source"
+command = "../../target/debug/cubex-record-source-plugin"
+args = ["allowed-record", "policy payload", "alice"]
+autostart = true
+
+[[plugins]]
+name = "denied-record-source"
+command = "../../target/debug/cubex-record-source-plugin"
+args = ["denied-record", "policy payload", "bob"]
+autostart = true
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "record-to-policy"
+source = "record-source"
+topic = "record.put"
+payload = "record"
+to = ["access-policy"]
+
+[[routes]]
+name = "denied-record-to-policy"
+source = "denied-record-source"
+topic = "record.put"
+payload = "record"
+to = ["access-policy"]
+
+[[routes]]
+name = "allowed-to-print"
+source = "access-policy"
+topic = "access.allowed"
+payload = "record"
+to = ["print"]
+
+[[routes]]
+name = "denied-to-print"
+source = "access-policy"
+topic = "access.denied"
+payload = "record"
+to = ["print"]

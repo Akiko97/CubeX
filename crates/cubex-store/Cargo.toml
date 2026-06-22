@@ -1,0 +1,11 @@
+[package]
+name = "cubex-store"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+bincode.workspace = true
+cubex-protocol = { path = "../cubex-protocol" }
+serde.workspace = true
+thiserror.workspace = true

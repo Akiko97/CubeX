@@ -1,0 +1,34 @@
+[engine]
+name = "record-store-list"
+max_messages = 32
+
+[[plugins]]
+name = "record-list"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["list.txt", "record.list", "record-key"]
+autostart = true
+
+[[plugins]]
+name = "record-store"
+command = "../../target/debug/cubex-record-store-plugin"
+working_dir = "."
+args = ["records.bin"]
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "list-to-store"
+source = "record-list"
+topic = "record.list"
+payload = "record"
+to = ["record-store"]
+
+[[routes]]
+name = "listed-to-print"
+source = "record-store"
+topic = "record.listed"
+payload = "text"
+to = ["print"]

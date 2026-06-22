@@ -1,0 +1,34 @@
+[engine]
+name = "file-flow-example"
+max_messages = 32
+
+[[plugins]]
+name = "file-source"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["input.txt", "file.read", "text"]
+autostart = true
+
+[[plugins]]
+name = "file-sink"
+command = "../../target/debug/cubex-file-sink-plugin"
+working_dir = "."
+args = ["output.txt"]
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "source-to-sink-and-print"
+source = "file-source"
+topic = "file.read"
+payload = "text"
+to = ["file-sink", "print"]
+
+[[routes]]
+name = "sink-ack-to-print"
+source = "file-sink"
+topic = "file.written"
+payload = "text"
+to = ["print"]

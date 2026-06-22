@@ -1,0 +1,16 @@
+[package]
+name = "cubex-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "cubex"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+cubex-core = { path = "../cubex-core" }
+cubex-protocol = { path = "../cubex-protocol" }
+cubex-store = { path = "../cubex-store" }

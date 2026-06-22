@@ -1,0 +1,10 @@
+[package]
+name = "cubex-record-store-plugin"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cubex-plugin-sdk = { path = "../../crates/cubex-plugin-sdk" }
+cubex-store = { path = "../../crates/cubex-store" }

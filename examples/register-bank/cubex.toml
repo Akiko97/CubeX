@@ -1,0 +1,45 @@
+[engine]
+name = "register-bank-example"
+max_messages = 32
+
+[[plugins]]
+name = "register-client"
+command = "../../target/debug/cubex-register-client-plugin"
+args = ["7", "42"]
+autostart = true
+
+[[plugins]]
+name = "register-bank"
+command = "../../target/debug/cubex-register-bank-plugin"
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "register-write"
+source = "register-client"
+topic = "register.write"
+payload = "record"
+to = ["register-bank"]
+
+[[routes]]
+name = "register-read"
+source = "register-client"
+topic = "register.read"
+payload = "record"
+to = ["register-bank"]
+
+[[routes]]
+name = "write-ack-to-print"
+source = "register-bank"
+topic = "register.written"
+payload = "record"
+to = ["print"]
+
+[[routes]]
+name = "read-value-to-print"
+source = "register-bank"
+topic = "register.value"
+payload = "record"
+to = ["print"]

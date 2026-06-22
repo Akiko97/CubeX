@@ -1,0 +1,45 @@
+[engine]
+name = "crypto-example"
+max_messages = 32
+
+[[plugins]]
+name = "hello"
+command = "../../target/debug/cubex-hello-plugin"
+args = ["CubeX"]
+autostart = true
+
+[[plugins]]
+name = "bytes"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["../bytes-flow/input.bin", "file.bytes", "bytes"]
+autostart = true
+
+[[plugins]]
+name = "sha256"
+command = "../../target/debug/cubex-sha256-plugin"
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "greeting-to-sha256"
+source = "hello"
+topic = "hello.greeting"
+payload = "text"
+to = ["sha256"]
+
+[[routes]]
+name = "bytes-to-sha256"
+source = "bytes"
+topic = "file.bytes"
+payload = "bytes"
+to = ["sha256"]
+
+[[routes]]
+name = "digest-to-print"
+source = "sha256"
+topic = "crypto.sha256"
+payload = "record"
+to = ["print"]
