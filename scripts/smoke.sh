@@ -24,6 +24,15 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace
+cargo build --target wasm32-unknown-unknown \
+  -p cubex-wasm-access-policy-plugin \
+  -p cubex-wasm-echo-plugin \
+  -p cubex-wasm-hello-plugin \
+  -p cubex-wasm-print-plugin \
+  -p cubex-wasm-record-source-plugin \
+  -p cubex-wasm-register-bank-plugin \
+  -p cubex-wasm-register-client-plugin \
+  -p cubex-wasm-sha256-plugin
 
 for config in examples/*/*.toml; do
   [[ "$(basename "$config")" == "Cargo.toml" ]] && continue
@@ -41,6 +50,11 @@ run_and_expect examples/crypto/cubex.toml '9be26ffe0395269a8e85bd7a3278ef853d861
 run_and_expect examples/crypto/cubex.toml '7f4617f80e9020429b94e1ec86c8b0631d36f1ff76efa95920430f793477fd4a'
 run_and_expect examples/network/cubex.toml "print: network ping"
 run_and_expect examples/plugin-project/cubex.toml "print: hello from a real plugin project"
+run_and_expect examples/wasm-hello/cubex.toml "wasm-print: Hello, CubeX!"
+run_and_expect examples/wasm-crypto/cubex.toml '9be26ffe0395269a8e85bd7a3278ef853d86138eb11354308dfdfb2a63b8d85a'
+run_and_expect examples/wasm-access-control/cubex.toml '"decision": String("allowed")'
+run_and_expect examples/wasm-access-control/cubex.toml '"decision": String("denied")'
+run_and_expect examples/wasm-register-bank/cubex.toml 'wasm-print: Record({"address": U64(7), "value": U64(42)})'
 
 run_and_expect examples/file-flow/cubex.toml "print: output.txt"
 cmp -s examples/file-flow/input.txt examples/file-flow/output.txt

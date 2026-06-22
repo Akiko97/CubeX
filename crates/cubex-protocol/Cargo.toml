@@ -9,3 +9,6 @@ bincode.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+uuid = { workspace = true, features = ["v4"] }

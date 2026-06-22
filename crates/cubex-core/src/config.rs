@@ -40,6 +40,13 @@ impl Config {
             {
                 plugin.command = base_dir.join(&plugin.command);
             }
+            if let Some(wasm) = &mut plugin.wasm
+                && !wasm.as_os_str().is_empty()
+                && !path_is_blank(wasm)
+                && wasm.is_relative()
+            {
+                *wasm = base_dir.join(&wasm);
+            }
             if let Some(working_dir) = &mut plugin.working_dir
                 && !working_dir.as_os_str().is_empty()
                 && !path_is_blank(working_dir)
@@ -85,7 +92,10 @@ pub struct StoreConfig {
 #[serde(deny_unknown_fields)]
 pub struct PluginConfig {
     pub name: String,
+    #[serde(default)]
     pub command: PathBuf,
+    #[serde(default)]
+    pub wasm: Option<PathBuf>,
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
     #[serde(default)]
@@ -170,14 +180,31 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
                 plugin.name
             )));
         }
-        if plugin.command.as_os_str().is_empty() {
-            return Err(Error::InvalidConfig(
-                "plugin.command must not be empty".into(),
-            ));
-        }
-        if plugin.command.to_string_lossy().trim().is_empty() {
+        if !plugin.command.as_os_str().is_empty() && path_is_blank(&plugin.command) {
             return Err(Error::InvalidConfig(
                 "plugin.command must not be blank".into(),
+            ));
+        }
+        if plugin
+            .wasm
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(Error::InvalidConfig("plugin.wasm must not be empty".into()));
+        }
+        if plugin.wasm.as_ref().is_some_and(|path| path_is_blank(path)) {
+            return Err(Error::InvalidConfig("plugin.wasm must not be blank".into()));
+        }
+        let has_command = !plugin.command.as_os_str().is_empty();
+        let has_wasm = plugin.wasm.is_some();
+        if !has_command && !has_wasm {
+            return Err(Error::InvalidConfig(
+                "plugin.command or plugin.wasm must be set".into(),
+            ));
+        }
+        if has_command && has_wasm {
+            return Err(Error::InvalidConfig(
+                "plugin.command and plugin.wasm are mutually exclusive".into(),
             ));
         }
         if plugin

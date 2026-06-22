@@ -11,4 +11,5 @@ cubex-store = { path = "../cubex-store" }
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+wasmtime.workspace = true

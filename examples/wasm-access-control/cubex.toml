@@ -1,0 +1,53 @@
+[engine]
+name = "wasm-access-control-example"
+max_messages = 32
+
+[[plugins]]
+name = "wasm-access-policy"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_access_policy_plugin.wasm"
+args = ["alice=record.put"]
+autostart = true
+
+[[plugins]]
+name = "wasm-record-source"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_record_source_plugin.wasm"
+args = ["allowed-record", "policy payload", "alice"]
+autostart = true
+
+[[plugins]]
+name = "wasm-denied-record-source"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_record_source_plugin.wasm"
+args = ["denied-record", "policy payload", "bob"]
+autostart = true
+
+[[plugins]]
+name = "wasm-print"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm"
+
+[[routes]]
+name = "wasm-record-to-policy"
+source = "wasm-record-source"
+topic = "record.put"
+payload = "record"
+to = ["wasm-access-policy"]
+
+[[routes]]
+name = "wasm-denied-record-to-policy"
+source = "wasm-denied-record-source"
+topic = "record.put"
+payload = "record"
+to = ["wasm-access-policy"]
+
+[[routes]]
+name = "wasm-allowed-to-print"
+source = "wasm-access-policy"
+topic = "access.allowed"
+payload = "record"
+to = ["wasm-print"]
+
+[[routes]]
+name = "wasm-denied-to-print"
+source = "wasm-access-policy"
+topic = "access.denied"
+payload = "record"
+to = ["wasm-print"]

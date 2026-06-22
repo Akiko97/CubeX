@@ -18,6 +18,10 @@ autostart = true
 name = "print"
 command = "../../target/debug/cubex-print-plugin"
 
+[[plugins]]
+name = "wasm-print"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm"
+
 [[routes]]
 name = "greeting-to-print"
 source = "hello"
@@ -33,11 +37,13 @@ record = { user = "alice", priority = 7, active = true }
 to = ["print"]
 ```
 
-`command` paths are resolved relative to the config file. This keeps instances
-portable and avoids process-wide environment setup.
+Plugins use either `command` for a process plugin or `wasm` for a WebAssembly
+plugin. The fields are mutually exclusive. Both paths are resolved relative to
+the config file. This keeps instances portable and avoids process-wide
+environment setup.
 
-`engine.name`, plugin names, route names, and plugin commands must be non-empty.
-Plugin commands must not be only whitespace.
+`engine.name`, plugin names, route names, plugin commands, and plugin wasm paths
+must be non-empty. Plugin commands and wasm paths must not be only whitespace.
 String identifiers such as engine, plugin, route, source, topic, and target
 names must not be only whitespace or have leading/trailing whitespace.
 Plugin names must not reuse `engine.name`.
@@ -79,8 +85,8 @@ cargo run -p cubex-cli -- check --strict -c examples/hello/cubex.toml
 ```
 
 Use `--strict` after building plugins to also verify configured plugin commands
-exist, are executable, any `working_dir` entries are directories, and
-`store.path` does not point at a directory or through a file parent. If
+exist and are executable, configured wasm files exist, any `working_dir` entries
+are directories, and `store.path` does not point at a directory or through a file parent. If
 `store.path` already exists, strict checks also verify that it is a readable
 CubeX event log.
 `run --strict` applies the same file checks before starting plugins.

@@ -115,6 +115,64 @@ Run the included plugin project example:
 cargo run -p cubex-cli -- run --strict -c examples/plugin-project/cubex.toml
 ```
 
+## Wasm plugins
+
+Wasm plugins depend on `cubex-wasm-plugin-sdk`, build as `cdylib`, implement the
+same `Plugin` shape, and export the ABI with `export_plugin!`.
+
+`plugins/wasm-my-plugin/Cargo.toml`:
+
+```toml
+[package]
+name = "cubex-wasm-my-plugin"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow.workspace = true
+cubex-wasm-plugin-sdk = { path = "../../crates/cubex-wasm-plugin-sdk" }
+```
+
+`plugins/wasm-my-plugin/src/lib.rs`:
+
+```rust
+use cubex_wasm_plugin_sdk::{Message, Payload, Plugin, PluginRequest, PluginResponse};
+
+#[derive(Default)]
+struct WasmMyPlugin;
+
+impl Plugin for WasmMyPlugin {
+    fn handle(&mut self, request: PluginRequest) -> anyhow::Result<PluginResponse> {
+        Ok(PluginResponse {
+            messages: vec![Message::new(request.plugin, "wasm.ready", Payload::Text("ok".into()))],
+            logs: Vec::new(),
+            error: None,
+        })
+    }
+}
+
+cubex_wasm_plugin_sdk::export_plugin!(WasmMyPlugin);
+```
+
+Build and run a wasm example:
+
+```sh
+cargo build --target wasm32-unknown-unknown -p cubex-wasm-hello-plugin -p cubex-wasm-echo-plugin -p cubex-wasm-print-plugin
+cargo run -p cubex-cli -- run --strict -c examples/wasm-hello/cubex.toml
+```
+
+Register a wasm plugin with `wasm`; do not set `command` on the same plugin:
+
+```toml
+[[plugins]]
+name = "wasm-my-plugin"
+wasm = "./target/wasm32-unknown-unknown/debug/cubex_wasm_my_plugin.wasm"
+```
+
 Plugin `args` come from the `system.start` control message. The host does not pass
 them as process argv. Keep stdout for binary protocol frames; return user-visible
 logs through `PluginResponse.logs`. The host also sends `system.stop` during

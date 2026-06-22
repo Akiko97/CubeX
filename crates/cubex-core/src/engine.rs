@@ -7,6 +7,13 @@ use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
+use wasmtime::{
+    Config as WasmtimeConfig, Engine as WasmtimeEngine, Instance, Linker, Memory, Module, Store,
+    StoreLimits, StoreLimitsBuilder, TypedFunc,
+};
+
+const WASM_CALL_FUEL: u64 = 100_000_000;
+const WASM_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunReport {
@@ -30,7 +37,7 @@ pub struct Engine {
     store: Option<EventLog>,
     replay_on_start: bool,
     plugin_order: Vec<String>,
-    plugins: BTreeMap<String, ProcessPlugin>,
+    plugins: BTreeMap<String, RuntimePlugin>,
     routes: Vec<RouteConfig>,
 }
 
@@ -45,7 +52,7 @@ impl Engine {
         let plugins = config
             .plugins
             .into_iter()
-            .map(|plugin| Ok((plugin.name.clone(), ProcessPlugin::new(plugin)?)))
+            .map(|plugin| Ok((plugin.name.clone(), RuntimePlugin::new(plugin)?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(Self {
             name: config.engine.name,
@@ -91,7 +98,7 @@ impl Engine {
                 .plugins
                 .get(name)
                 .ok_or_else(|| Error::MissingPlugin(name.clone()))?;
-            if !plugin.autostart {
+            if !plugin.autostart() {
                 continue;
             }
             self.start_plugin(name, plugin, false, &mut queue, &mut report)?;
@@ -151,7 +158,7 @@ impl Engine {
     fn start_plugin(
         &self,
         name: &str,
-        plugin: &ProcessPlugin,
+        plugin: &RuntimePlugin,
         replayed: bool,
         queue: &mut VecDeque<QueuedMessage>,
         report: &mut RunReport,
@@ -161,7 +168,7 @@ impl Engine {
             self.name.clone(),
             "system.start",
             Payload::Control(Control::Start {
-                args: plugin.args.clone(),
+                args: plugin.args().to_vec(),
             }),
         );
         self.call_plugin(name, plugin, start, replayed, queue, report)
@@ -206,7 +213,7 @@ impl Engine {
     fn call_plugin(
         &self,
         name: &str,
-        plugin: &ProcessPlugin,
+        plugin: &RuntimePlugin,
         message: Message,
         replayed: bool,
         queue: &mut VecDeque<QueuedMessage>,
@@ -350,6 +357,53 @@ impl QueuedMessage {
         Self {
             message,
             replayed: true,
+        }
+    }
+}
+
+enum RuntimePlugin {
+    Process(ProcessPlugin),
+    Wasm(WasmPlugin),
+}
+
+impl RuntimePlugin {
+    fn new(config: PluginConfig) -> Result<Self> {
+        if let Some(wasm) = &config.wasm {
+            return Ok(Self::Wasm(WasmPlugin::new(
+                config.name,
+                wasm.clone(),
+                config.args,
+                config.autostart,
+            )?));
+        }
+        Ok(Self::Process(ProcessPlugin::new(config)?))
+    }
+
+    fn autostart(&self) -> bool {
+        match self {
+            Self::Process(plugin) => plugin.autostart,
+            Self::Wasm(plugin) => plugin.autostart,
+        }
+    }
+
+    fn args(&self) -> &[String] {
+        match self {
+            Self::Process(plugin) => &plugin.args,
+            Self::Wasm(plugin) => &plugin.args,
+        }
+    }
+
+    fn call(&self, request: PluginRequest) -> Result<PluginResponse> {
+        match self {
+            Self::Process(plugin) => plugin.call(request),
+            Self::Wasm(plugin) => plugin.call(request),
+        }
+    }
+
+    fn shutdown(&self, source: &str) -> Result<Option<PluginResponse>> {
+        match self {
+            Self::Process(plugin) => plugin.shutdown(source),
+            Self::Wasm(plugin) => plugin.shutdown(source),
         }
     }
 }
@@ -507,6 +561,208 @@ impl PluginChild {
             }),
         }
     }
+}
+
+struct WasmPlugin {
+    name: String,
+    path: PathBuf,
+    args: Vec<String>,
+    autostart: bool,
+    engine: WasmtimeEngine,
+    instance: Mutex<Option<WasmPluginInstance>>,
+}
+
+struct WasmPluginInstance {
+    store: Store<WasmStoreState>,
+    memory: Memory,
+    alloc: TypedFunc<i32, i32>,
+    free: TypedFunc<(i32, i32), ()>,
+    handle: TypedFunc<(i32, i32), i64>,
+}
+
+struct WasmStoreState {
+    limits: StoreLimits,
+}
+
+impl WasmPlugin {
+    fn new(name: String, path: PathBuf, args: Vec<String>, autostart: bool) -> Result<Self> {
+        let mut config = WasmtimeConfig::new();
+        config.consume_fuel(true);
+        let engine = WasmtimeEngine::new(&config).map_err(|err| Error::PluginState {
+            plugin: name.clone(),
+            reason: format!("failed to configure wasm engine: {err}"),
+        })?;
+        Ok(Self {
+            name,
+            path,
+            args,
+            autostart,
+            engine,
+            instance: Mutex::new(None),
+        })
+    }
+
+    fn call(&self, request: PluginRequest) -> Result<PluginResponse> {
+        let mut guard = self.instance.lock().map_err(|_| Error::PluginState {
+            plugin: self.name.clone(),
+            reason: "wasm instance lock poisoned".into(),
+        })?;
+        if guard.is_none() {
+            *guard = Some(self.instantiate()?);
+        }
+        guard
+            .as_mut()
+            .ok_or_else(|| Error::PluginState {
+                plugin: self.name.clone(),
+                reason: "wasm instance was not started".into(),
+            })?
+            .call(&self.name, request)
+    }
+
+    fn shutdown(&self, source: &str) -> Result<Option<PluginResponse>> {
+        let mut guard = self.instance.lock().map_err(|_| Error::PluginState {
+            plugin: self.name.clone(),
+            reason: "wasm instance lock poisoned".into(),
+        })?;
+        let Some(mut instance) = guard.take() else {
+            return Ok(None);
+        };
+        instance
+            .call(
+                &self.name,
+                PluginRequest {
+                    plugin: self.name.clone(),
+                    message: Message::new(source, "system.stop", Payload::Control(Control::Stop)),
+                },
+            )
+            .map(Some)
+    }
+
+    fn instantiate(&self) -> Result<WasmPluginInstance> {
+        let mut store = Store::new(
+            &self.engine,
+            WasmStoreState {
+                limits: wasm_store_limits(),
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        set_wasm_fuel(&mut store, &self.name)?;
+        let module =
+            Module::from_file(&self.engine, &self.path).map_err(|err| Error::PluginState {
+                plugin: self.name.clone(),
+                reason: format!("failed to load wasm `{}`: {err}", self.path.display()),
+            })?;
+        let linker = Linker::new(&self.engine);
+        let instance =
+            linker
+                .instantiate(&mut store, &module)
+                .map_err(|err| Error::PluginState {
+                    plugin: self.name.clone(),
+                    reason: format!("failed to instantiate wasm: {err}"),
+                })?;
+        WasmPluginInstance::new(&self.name, store, instance)
+    }
+}
+
+impl WasmPluginInstance {
+    fn new(name: &str, mut store: Store<WasmStoreState>, instance: Instance) -> Result<Self> {
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or_else(|| wasm_state(name, "missing wasm export `memory`"))?;
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&mut store, "cubex_plugin_alloc")
+            .map_err(|err| wasm_state(name, err))?;
+        let free = instance
+            .get_typed_func::<(i32, i32), ()>(&mut store, "cubex_plugin_free")
+            .map_err(|err| wasm_state(name, err))?;
+        let handle = instance
+            .get_typed_func::<(i32, i32), i64>(&mut store, "cubex_plugin_handle")
+            .map_err(|err| wasm_state(name, err))?;
+        Ok(Self {
+            store,
+            memory,
+            alloc,
+            free,
+            handle,
+        })
+    }
+
+    fn call(&mut self, name: &str, request: PluginRequest) -> Result<PluginResponse> {
+        let bytes = cubex_protocol::encode(&request)?;
+        let input_len = u32::try_from(bytes.len())
+            .map_err(|_| cubex_protocol::ProtocolError::FrameTooLarge(u32::MAX))?;
+        if input_len > cubex_protocol::MAX_FRAME_SIZE {
+            return Err(cubex_protocol::ProtocolError::FrameTooLarge(input_len).into());
+        }
+        let input_len = input_len as i32;
+        self.refuel(name)?;
+        let input_ptr = self
+            .alloc
+            .call(&mut self.store, input_len)
+            .map_err(|err| wasm_state(name, err))?;
+        let input_offset = input_ptr as u32 as usize;
+        if let Err(err) = self.memory.write(&mut self.store, input_offset, &bytes) {
+            self.free_buffer(input_ptr, input_len);
+            return Err(wasm_state(name, err));
+        }
+        self.refuel(name)?;
+        let packed = match self.handle.call(&mut self.store, (input_ptr, input_len)) {
+            Ok(packed) => packed as u64,
+            Err(err) => {
+                self.free_buffer(input_ptr, input_len);
+                return Err(wasm_state(name, err));
+            }
+        };
+        self.free_buffer(input_ptr, input_len);
+
+        let output_ptr = (packed & u64::from(u32::MAX)) as u32;
+        let output_len = (packed >> 32) as u32;
+        if output_len > cubex_protocol::MAX_FRAME_SIZE {
+            return Err(cubex_protocol::ProtocolError::FrameTooLarge(output_len).into());
+        }
+        let mut output = vec![0_u8; output_len as usize];
+        if let Err(err) = self
+            .memory
+            .read(&mut self.store, output_ptr as usize, &mut output)
+        {
+            self.free_buffer(output_ptr as i32, output_len as i32);
+            return Err(wasm_state(name, err));
+        }
+        self.free_buffer(output_ptr as i32, output_len as i32);
+        cubex_protocol::decode(&output).map_err(Error::from)
+    }
+
+    fn refuel(&mut self, name: &str) -> Result<()> {
+        set_wasm_fuel(&mut self.store, name)
+    }
+
+    fn free_buffer(&mut self, ptr: i32, len: i32) {
+        let _ = self.store.set_fuel(WASM_CALL_FUEL);
+        let _ = self.free.call(&mut self.store, (ptr, len));
+    }
+}
+
+fn wasm_state(name: &str, reason: impl std::fmt::Display) -> Error {
+    Error::PluginState {
+        plugin: name.into(),
+        reason: reason.to_string(),
+    }
+}
+
+fn set_wasm_fuel(store: &mut Store<WasmStoreState>, name: &str) -> Result<()> {
+    store
+        .set_fuel(WASM_CALL_FUEL)
+        .map_err(|err| wasm_state(name, err))
+}
+
+fn wasm_store_limits() -> StoreLimits {
+    StoreLimitsBuilder::new()
+        .memory_size(WASM_MEMORY_LIMIT_BYTES)
+        .instances(1)
+        .memories(1)
+        .tables(2)
+        .trap_on_grow_failure(true)
+        .build()
 }
 
 #[cfg(test)]
@@ -1073,6 +1329,42 @@ to = ["policy"]
     }
 
     #[test]
+    fn plugin_backend_must_be_command_or_wasm() {
+        let mut plugin = plugin("print");
+        plugin.wasm = Some("plugin.wasm".into());
+        let config = Config {
+            plugins: vec![plugin],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message))
+                if message == "plugin.command and plugin.wasm are mutually exclusive"
+        ));
+    }
+
+    #[test]
+    fn wasm_plugin_config_does_not_load_module_eagerly() {
+        let path =
+            std::env::temp_dir().join(format!("cubex-missing-{}.wasm", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&path);
+        let config = Config {
+            plugins: vec![PluginConfig {
+                name: "wasm".into(),
+                command: PathBuf::new(),
+                wasm: Some(path.clone()),
+                working_dir: None,
+                args: Vec::new(),
+                autostart: false,
+            }],
+            ..Config::default()
+        };
+
+        assert!(Engine::from_config(config).is_ok());
+    }
+
+    #[test]
     fn path_resolution_preserves_empty_plugin_command() {
         let mut config = Config {
             plugins: vec![plugin("print")],
@@ -1135,6 +1427,7 @@ to = ["policy"]
             plugins: vec![PluginConfig {
                 name: "print".into(),
                 command: PathBuf::from(" "),
+                wasm: None,
                 working_dir: Some(PathBuf::from(" ")),
                 args: Vec::new(),
                 autostart: false,
@@ -1164,6 +1457,10 @@ path = "events.bin"
 name = "plugin"
 command = "bin/plugin"
 working_dir = "work"
+
+[[plugins]]
+name = "wasm-plugin"
+wasm = "wasm/plugin.wasm"
 "#,
         )
         .unwrap();
@@ -1178,6 +1475,10 @@ working_dir = "work"
         assert_eq!(
             config.plugins[0].working_dir.as_deref(),
             Some(dir.join("work").as_path())
+        );
+        assert_eq!(
+            config.plugins[1].wasm.as_deref(),
+            Some(dir.join("wasm/plugin.wasm").as_path())
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1482,7 +1783,9 @@ to = ["plugin"]
             ..Config::default()
         })
         .unwrap();
-        let plugin = engine.plugins.get("poisoned").unwrap();
+        let RuntimePlugin::Process(plugin) = engine.plugins.get("poisoned").unwrap() else {
+            panic!("expected process plugin");
+        };
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = plugin.child.lock().unwrap();
             panic!("poison child lock");
@@ -1527,6 +1830,7 @@ to = ["plugin"]
             plugins: vec![PluginConfig {
                 name: "bad-stop".into(),
                 command: script_path,
+                wasm: None,
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
@@ -1597,6 +1901,7 @@ to = ["plugin"]
                 PluginConfig {
                     name: "good-stop".into(),
                     command: good_script_path,
+                    wasm: None,
                     working_dir: None,
                     args: Vec::new(),
                     autostart: true,
@@ -1604,6 +1909,7 @@ to = ["plugin"]
                 PluginConfig {
                     name: "bad-stop".into(),
                     command: bad_script_path,
+                    wasm: None,
                     working_dir: None,
                     args: Vec::new(),
                     autostart: true,
@@ -1617,16 +1923,10 @@ to = ["plugin"]
             engine.run(),
             Err(Error::Protocol(cubex_protocol::ProtocolError::Codec(_)))
         ));
-        assert!(
-            engine
-                .plugins
-                .get("good-stop")
-                .unwrap()
-                .child
-                .lock()
-                .unwrap()
-                .is_none()
-        );
+        let RuntimePlugin::Process(plugin) = engine.plugins.get("good-stop").unwrap() else {
+            panic!("expected process plugin");
+        };
+        assert!(plugin.child.lock().unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1670,6 +1970,7 @@ to = ["plugin"]
             plugins: vec![PluginConfig {
                 name: "stop-log".into(),
                 command: script_path,
+                wasm: None,
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
@@ -1715,6 +2016,7 @@ to = ["plugin"]
             plugins: vec![PluginConfig {
                 name: "bad-exit".into(),
                 command: script_path,
+                wasm: None,
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
@@ -1777,6 +2079,7 @@ to = ["plugin"]
             plugins: vec![PluginConfig {
                 name: "late-plugin".into(),
                 command: script_path,
+                wasm: None,
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
@@ -1833,6 +2136,7 @@ to = ["plugin"]
             plugins: vec![PluginConfig {
                 name: "bad-plugin".into(),
                 command: script_path,
+                wasm: None,
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
@@ -1919,6 +2223,7 @@ to = ["plugin"]
                 PluginConfig {
                     name: "deriver".into(),
                     command: script_path,
+                    wasm: None,
                     working_dir: None,
                     args: Vec::new(),
                     autostart: false,
@@ -1959,6 +2264,7 @@ to = ["plugin"]
         let plugin = ProcessPlugin::new(PluginConfig {
             name: "dead-plugin".into(),
             command: script_path,
+            wasm: None,
             working_dir: None,
             args: Vec::new(),
             autostart: false,
@@ -2001,6 +2307,7 @@ to = ["plugin"]
         let plugin = ProcessPlugin::new(PluginConfig {
             name: "partial-plugin".into(),
             command: script_path,
+            wasm: None,
             working_dir: None,
             args: Vec::new(),
             autostart: false,
@@ -2058,6 +2365,7 @@ to = ["plugin"]
             plugins: vec![PluginConfig {
                 name: "actual-plugin".into(),
                 command: script_path,
+                wasm: None,
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
@@ -2075,6 +2383,7 @@ to = ["plugin"]
         PluginConfig {
             name: name.into(),
             command: "unused".into(),
+            wasm: None,
             working_dir: None,
             args: Vec::new(),
             autostart: false,

@@ -5,6 +5,7 @@ members = [
     "crates/cubex-plugin-sdk",
     "crates/cubex-protocol",
     "crates/cubex-store",
+    "crates/cubex-wasm-plugin-sdk",
     "examples/plugin-project",
     "plugins/access-policy-plugin",
     "plugins/echo-plugin",
@@ -20,6 +21,14 @@ members = [
     "plugins/tcp-client-plugin",
     "plugins/tcp-echo-plugin",
     "plugins/timer-plugin",
+    "plugins/wasm-access-policy-plugin",
+    "plugins/wasm-echo-plugin",
+    "plugins/wasm-hello-plugin",
+    "plugins/wasm-print-plugin",
+    "plugins/wasm-record-source-plugin",
+    "plugins/wasm-register-bank-plugin",
+    "plugins/wasm-register-client-plugin",
+    "plugins/wasm-sha256-plugin",
 ]
 resolver = "3"
 
@@ -36,7 +45,8 @@ serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2.0"
 toml = "0.9"
-uuid = { version = "1.18", features = ["serde", "v4"] }
+uuid = { version = "1.18", features = ["serde"] }
+wasmtime = "38.0.4"
 
 [profile.release]
 lto = "thin"
