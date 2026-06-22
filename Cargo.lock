@@ -635,6 +635,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cubex-wasm-random-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cubex-wasm-plugin-sdk",
+]
+
+[[package]]
 name = "cubex-wasm-record-source-plugin"
 version = "0.1.0"
 dependencies = [

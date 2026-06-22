@@ -23,6 +23,7 @@ plugins using `cubex-wasm-plugin-sdk`.
 - `cubex-wasm-record-store-plugin`: Wasm durable record store using a record-store capability.
 - `cubex-wasm-register-client-plugin`, `cubex-wasm-register-bank-plugin`: Wasm variants for in-memory register flows.
 - `cubex-wasm-sha256-plugin`: Wasm SHA-256 plugin.
+- `cubex-wasm-random-plugin`: Wasm random byte plugin using the host random ABI.
 - `cubex-wasm-tcp-client-plugin`, `cubex-wasm-tcp-echo-plugin`: Wasm TCP client and echo plugins using TCP capabilities.
 - `cubex-wasm-timer-plugin`: Wasm timer plugin using the timer capability.
 
@@ -37,6 +38,7 @@ cargo build --target wasm32-unknown-unknown \
   -p cubex-wasm-file-source-plugin \
   -p cubex-wasm-hello-plugin \
   -p cubex-wasm-print-plugin \
+  -p cubex-wasm-random-plugin \
   -p cubex-wasm-record-source-plugin \
   -p cubex-wasm-record-store-plugin \
   -p cubex-wasm-register-bank-plugin \
@@ -78,6 +80,7 @@ cargo run -p cubex-cli -- run --strict -c examples/wasm-hello/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-crypto/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-access-control/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-register-bank/cubex.toml
+cargo run -p cubex-cli -- run --strict -c examples/wasm-random/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-file-flow/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-bytes-flow/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-network/cubex.toml

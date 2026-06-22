@@ -1,0 +1,20 @@
+[engine]
+name = "wasm-random-example"
+max_messages = 16
+
+[[plugins]]
+name = "wasm-random"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_random_plugin.wasm"
+args = ["16", "random.bytes"]
+autostart = true
+
+[[plugins]]
+name = "wasm-print"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm"
+
+[[routes]]
+name = "wasm-random-to-print"
+source = "wasm-random"
+topic = "random.bytes"
+payload = "text"
+to = ["wasm-print"]
