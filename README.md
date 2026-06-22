@@ -64,3 +64,12 @@ Read more:
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
 - [Plugin guide](docs/plugin-guide.md)
+
+## Disclaimer
+
+This project is a clumsy imitation of
+[cubeos-1.5](https://gitee.com/biparadox/cubeos-1.5), a long-running work built
+over many years. CubeX only borrows a few surface ideas and tries to reinterpret
+them in Rust; it does not claim to reproduce the depth, history, or hard-won
+engineering experience of the original system. Any rough edges, omissions, or
+misunderstandings here are entirely mine.
