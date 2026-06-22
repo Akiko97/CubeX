@@ -18,9 +18,13 @@ plugins using `cubex-wasm-plugin-sdk`.
 - `cubex-tcp-echo-plugin`: starts a tiny TCP echo endpoint for local network flows; args are optional bind address and max connections.
 - `cubex-timer-plugin`: emits up to 1024 configured timer tick records; args are optional count, interval milliseconds, and topic.
 - `cubex-wasm-hello-plugin`, `cubex-wasm-echo-plugin`, `cubex-wasm-print-plugin`: Wasm variants for basic text flows.
+- `cubex-wasm-file-source-plugin`, `cubex-wasm-file-sink-plugin`: Wasm file source/sink plugins using file capabilities.
 - `cubex-wasm-record-source-plugin`, `cubex-wasm-access-policy-plugin`: Wasm variants for record policy flows.
+- `cubex-wasm-record-store-plugin`: Wasm durable record store using a record-store capability.
 - `cubex-wasm-register-client-plugin`, `cubex-wasm-register-bank-plugin`: Wasm variants for in-memory register flows.
 - `cubex-wasm-sha256-plugin`: Wasm SHA-256 plugin.
+- `cubex-wasm-tcp-client-plugin`, `cubex-wasm-tcp-echo-plugin`: Wasm TCP client and echo plugins using TCP capabilities.
+- `cubex-wasm-timer-plugin`: Wasm timer plugin using the timer capability.
 
 Build them with:
 
@@ -29,12 +33,18 @@ cargo build --workspace
 cargo build --target wasm32-unknown-unknown \
   -p cubex-wasm-access-policy-plugin \
   -p cubex-wasm-echo-plugin \
+  -p cubex-wasm-file-sink-plugin \
+  -p cubex-wasm-file-source-plugin \
   -p cubex-wasm-hello-plugin \
   -p cubex-wasm-print-plugin \
   -p cubex-wasm-record-source-plugin \
+  -p cubex-wasm-record-store-plugin \
   -p cubex-wasm-register-bank-plugin \
   -p cubex-wasm-register-client-plugin \
-  -p cubex-wasm-sha256-plugin
+  -p cubex-wasm-sha256-plugin \
+  -p cubex-wasm-tcp-client-plugin \
+  -p cubex-wasm-tcp-echo-plugin \
+  -p cubex-wasm-timer-plugin
 ```
 
 Run all plugin examples with:
@@ -68,4 +78,9 @@ cargo run -p cubex-cli -- run --strict -c examples/wasm-hello/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-crypto/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-access-control/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-register-bank/cubex.toml
+cargo run -p cubex-cli -- run --strict -c examples/wasm-file-flow/cubex.toml
+cargo run -p cubex-cli -- run --strict -c examples/wasm-bytes-flow/cubex.toml
+cargo run -p cubex-cli -- run --strict -c examples/wasm-network/cubex.toml
+cargo run -p cubex-cli -- run --strict -c examples/wasm-timer/cubex.toml
+cargo run -p cubex-cli -- run --strict -c examples/wasm-record-store/cubex.toml
 ```

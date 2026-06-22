@@ -23,12 +23,18 @@ members = [
     "plugins/timer-plugin",
     "plugins/wasm-access-policy-plugin",
     "plugins/wasm-echo-plugin",
+    "plugins/wasm-file-sink-plugin",
+    "plugins/wasm-file-source-plugin",
     "plugins/wasm-hello-plugin",
     "plugins/wasm-print-plugin",
     "plugins/wasm-record-source-plugin",
+    "plugins/wasm-record-store-plugin",
     "plugins/wasm-register-bank-plugin",
     "plugins/wasm-register-client-plugin",
     "plugins/wasm-sha256-plugin",
+    "plugins/wasm-tcp-client-plugin",
+    "plugins/wasm-tcp-echo-plugin",
+    "plugins/wasm-timer-plugin",
 ]
 resolver = "3"
 

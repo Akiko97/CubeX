@@ -320,6 +320,7 @@ mod tests {
             working_dir: Some(path.clone()),
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         });
 
         let error = check_runtime_files(&config).unwrap_err().to_string();
@@ -342,6 +343,7 @@ mod tests {
             working_dir: None,
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         });
 
         let error = check_runtime_files(&config).unwrap_err().to_string();
@@ -364,6 +366,7 @@ mod tests {
             working_dir: None,
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         });
 
         let error = check_runtime_files(&config).unwrap_err().to_string();
@@ -384,6 +387,7 @@ mod tests {
             working_dir: None,
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         });
 
         let error = check_runtime_files(&config).unwrap_err().to_string();
@@ -443,6 +447,7 @@ mod tests {
             working_dir: None,
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         });
 
         let error = check_runtime_files(&config).unwrap_err().to_string();

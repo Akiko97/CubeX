@@ -1,19 +1,29 @@
-use crate::config::{Config, PluginConfig, RouteConfig, has_edge_whitespace, validate_config};
+use crate::config::{
+    CapabilityConfig, Config, PluginConfig, RouteConfig, has_edge_whitespace, validate_config,
+};
 use crate::error::{Error, Result};
-use cubex_protocol::{Control, Message, Payload, PluginRequest, PluginResponse};
+use cubex_protocol::{
+    Control, HostPayload, HostRequest, HostResponse, Message, Payload, PluginRequest,
+    PluginResponse,
+};
 use cubex_store::EventLog;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::{BufReader, BufWriter};
-use std::path::PathBuf;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
 use wasmtime::{
-    Config as WasmtimeConfig, Engine as WasmtimeEngine, Instance, Linker, Memory, Module, Store,
-    StoreLimits, StoreLimitsBuilder, TypedFunc,
+    Caller, Config as WasmtimeConfig, Engine as WasmtimeEngine, Instance, Linker, Memory, Module,
+    Store, StoreLimits, StoreLimitsBuilder, TypedFunc,
 };
 
 const WASM_CALL_FUEL: u64 = 100_000_000;
 const WASM_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_WASM_SLEEP_MS: u64 = 60_000;
+const MAX_WASM_TCP_TIMEOUT_MS: u64 = 60_000;
+const MAX_WASM_TCP_ECHO_CONNECTIONS: u64 = 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunReport {
@@ -362,21 +372,23 @@ impl QueuedMessage {
 }
 
 enum RuntimePlugin {
-    Process(ProcessPlugin),
-    Wasm(WasmPlugin),
+    Process(Box<ProcessPlugin>),
+    Wasm(Box<WasmPlugin>),
 }
 
 impl RuntimePlugin {
     fn new(config: PluginConfig) -> Result<Self> {
         if let Some(wasm) = &config.wasm {
-            return Ok(Self::Wasm(WasmPlugin::new(
+            return Ok(Self::Wasm(Box::new(WasmPlugin::new(
                 config.name,
                 wasm.clone(),
+                config.working_dir,
                 config.args,
                 config.autostart,
-            )?));
+                config.capabilities,
+            )?)));
         }
-        Ok(Self::Process(ProcessPlugin::new(config)?))
+        Ok(Self::Process(Box::new(ProcessPlugin::new(config)?)))
     }
 
     fn autostart(&self) -> bool {
@@ -566,8 +578,10 @@ impl PluginChild {
 struct WasmPlugin {
     name: String,
     path: PathBuf,
+    working_dir: Option<PathBuf>,
     args: Vec<String>,
     autostart: bool,
+    capabilities: Vec<CapabilityConfig>,
     engine: WasmtimeEngine,
     instance: Mutex<Option<WasmPluginInstance>>,
 }
@@ -582,10 +596,24 @@ struct WasmPluginInstance {
 
 struct WasmStoreState {
     limits: StoreLimits,
+    host: WasmHostContext,
+}
+
+struct WasmHostContext {
+    plugin: String,
+    working_dir: Option<PathBuf>,
+    capabilities: Vec<CapabilityConfig>,
 }
 
 impl WasmPlugin {
-    fn new(name: String, path: PathBuf, args: Vec<String>, autostart: bool) -> Result<Self> {
+    fn new(
+        name: String,
+        path: PathBuf,
+        working_dir: Option<PathBuf>,
+        args: Vec<String>,
+        autostart: bool,
+        capabilities: Vec<CapabilityConfig>,
+    ) -> Result<Self> {
         let mut config = WasmtimeConfig::new();
         config.consume_fuel(true);
         let engine = WasmtimeEngine::new(&config).map_err(|err| Error::PluginState {
@@ -595,8 +623,10 @@ impl WasmPlugin {
         Ok(Self {
             name,
             path,
+            working_dir,
             args,
             autostart,
+            capabilities,
             engine,
             instance: Mutex::new(None),
         })
@@ -643,6 +673,11 @@ impl WasmPlugin {
             &self.engine,
             WasmStoreState {
                 limits: wasm_store_limits(),
+                host: WasmHostContext {
+                    plugin: self.name.clone(),
+                    working_dir: self.working_dir.clone(),
+                    capabilities: self.capabilities.clone(),
+                },
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -652,7 +687,10 @@ impl WasmPlugin {
                 plugin: self.name.clone(),
                 reason: format!("failed to load wasm `{}`: {err}", self.path.display()),
             })?;
-        let linker = Linker::new(&self.engine);
+        let mut linker = Linker::new(&self.engine);
+        linker
+            .func_wrap("cubex", "host_call", wasm_host_call)
+            .map_err(|err| wasm_state(&self.name, err))?;
         let instance =
             linker
                 .instantiate(&mut store, &module)
@@ -763,6 +801,336 @@ fn wasm_store_limits() -> StoreLimits {
         .tables(2)
         .trap_on_grow_failure(true)
         .build()
+}
+
+fn wasm_host_call(mut caller: Caller<'_, WasmStoreState>, ptr: i32, len: i32) -> i64 {
+    let response = match read_host_request(&mut caller, ptr, len)
+        .and_then(|request| handle_host_request(caller.data(), request))
+    {
+        Ok(payload) => HostResponse::ok(payload),
+        Err(err) => HostResponse::error(err.to_string()),
+    };
+    write_host_response(&mut caller, &response).unwrap_or_default()
+}
+
+fn read_host_request(
+    caller: &mut Caller<'_, WasmStoreState>,
+    ptr: i32,
+    len: i32,
+) -> anyhow::Result<HostRequest> {
+    if len <= 0 {
+        anyhow::bail!("host request length must be positive");
+    }
+    let len = u32::try_from(len)?;
+    if len > cubex_protocol::MAX_FRAME_SIZE {
+        anyhow::bail!("{}", cubex_protocol::ProtocolError::FrameTooLarge(len));
+    }
+    let memory = caller_memory(caller)?;
+    let mut bytes = vec![0_u8; len as usize];
+    memory.read(caller, ptr as u32 as usize, &mut bytes)?;
+    Ok(cubex_protocol::decode(&bytes)?)
+}
+
+fn write_host_response(
+    caller: &mut Caller<'_, WasmStoreState>,
+    response: &HostResponse,
+) -> anyhow::Result<i64> {
+    let bytes = cubex_protocol::encode(response)?;
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| cubex_protocol::ProtocolError::FrameTooLarge(u32::MAX))?;
+    if len > cubex_protocol::MAX_FRAME_SIZE {
+        return Err(cubex_protocol::ProtocolError::FrameTooLarge(len).into());
+    }
+    let len_i32 = i32::try_from(len)?;
+    let alloc = caller
+        .get_export("cubex_plugin_alloc")
+        .and_then(|export| export.into_func())
+        .ok_or_else(|| anyhow::anyhow!("missing wasm export `cubex_plugin_alloc`"))?;
+    let alloc = alloc.typed::<i32, i32>(&*caller)?;
+    let ptr = alloc.call(&mut *caller, len_i32)?;
+    caller_memory(caller)?.write(caller, ptr as u32 as usize, &bytes)?;
+    Ok(((len as i64) << 32) | (ptr as u32 as i64))
+}
+
+fn caller_memory(caller: &mut Caller<'_, WasmStoreState>) -> anyhow::Result<Memory> {
+    caller
+        .get_export("memory")
+        .and_then(|export| export.into_memory())
+        .ok_or_else(|| anyhow::anyhow!("missing wasm export `memory`"))
+}
+
+fn handle_host_request(
+    state: &WasmStoreState,
+    request: HostRequest,
+) -> anyhow::Result<HostPayload> {
+    match request {
+        HostRequest::FileRead { path } => {
+            let path = checked_path(&state.host, &path, CapabilityKind::FileRead)?;
+            Ok(HostPayload::Bytes(std::fs::read(path)?))
+        }
+        HostRequest::FileWrite { path, bytes } => {
+            let path = checked_path(&state.host, &path, CapabilityKind::FileWrite)?;
+            write_file_atomically(&path, &bytes)?;
+            Ok(HostPayload::Unit)
+        }
+        HostRequest::TcpRequest {
+            addr,
+            bytes,
+            timeout_ms,
+        } => {
+            check_addr(&state.host, &addr, CapabilityKind::TcpConnect)?;
+            Ok(HostPayload::Bytes(tcp_request(&addr, &bytes, timeout_ms)?))
+        }
+        HostRequest::TcpEcho {
+            addr,
+            max_connections,
+        } => {
+            check_addr(&state.host, &addr, CapabilityKind::TcpListen)?;
+            Ok(HostPayload::Text(tcp_echo(&addr, max_connections)?))
+        }
+        HostRequest::Sleep { millis } => {
+            check_timer(&state.host)?;
+            if millis > MAX_WASM_SLEEP_MS {
+                anyhow::bail!("sleep must be at most {MAX_WASM_SLEEP_MS} ms");
+            }
+            std::thread::sleep(Duration::from_millis(millis));
+            Ok(HostPayload::Unit)
+        }
+        HostRequest::RecordPut { path, key, message } => {
+            let path = checked_path(&state.host, &path, CapabilityKind::RecordStore)?;
+            cubex_store::RecordStore::new(path).put(key, message)?;
+            Ok(HostPayload::Unit)
+        }
+        HostRequest::RecordGet { path, key } => {
+            let path = checked_path(&state.host, &path, CapabilityKind::RecordStore)?;
+            let message = cubex_store::RecordStore::new(path)
+                .get(&key)?
+                .map(|record| record.message);
+            Ok(HostPayload::Message(message))
+        }
+        HostRequest::RecordDelete { path, key } => {
+            let path = checked_path(&state.host, &path, CapabilityKind::RecordStore)?;
+            Ok(HostPayload::Bool(
+                cubex_store::RecordStore::new(path).delete(&key)?,
+            ))
+        }
+        HostRequest::RecordList { path } => {
+            let path = checked_path(&state.host, &path, CapabilityKind::RecordStore)?;
+            let keys = cubex_store::RecordStore::new(path)
+                .load()?
+                .keys()
+                .cloned()
+                .collect();
+            Ok(HostPayload::StringList(keys))
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum CapabilityKind {
+    FileRead,
+    FileWrite,
+    TcpConnect,
+    TcpListen,
+    RecordStore,
+}
+
+fn checked_path(
+    host: &WasmHostContext,
+    requested: &str,
+    kind: CapabilityKind,
+) -> anyhow::Result<PathBuf> {
+    let requested = plugin_path(host, requested)?;
+    for capability in &host.capabilities {
+        let allowed = match (kind, capability) {
+            (CapabilityKind::FileRead, CapabilityConfig::FileRead { path })
+            | (CapabilityKind::FileWrite, CapabilityConfig::FileWrite { path })
+            | (CapabilityKind::RecordStore, CapabilityConfig::RecordStore { path }) => {
+                normalize_host_path(path.clone())?
+            }
+            _ => continue,
+        };
+        if requested == allowed {
+            return Ok(requested);
+        }
+    }
+    anyhow::bail!(
+        "plugin `{}` lacks capability for path {}",
+        host.plugin,
+        requested.display()
+    )
+}
+
+fn plugin_path(host: &WasmHostContext, requested: &str) -> anyhow::Result<PathBuf> {
+    if requested.trim().is_empty() {
+        anyhow::bail!("capability path must not be empty");
+    }
+    if requested.trim() != requested {
+        anyhow::bail!("capability path must not be padded");
+    }
+    let path = PathBuf::from(requested);
+    let path = if path.is_relative() {
+        host.working_dir
+            .clone()
+            .unwrap_or(std::env::current_dir()?)
+            .join(path)
+    } else {
+        path
+    };
+    normalize_host_path(path)
+}
+
+fn normalize_host_path(path: PathBuf) -> anyhow::Result<PathBuf> {
+    Ok(std::path::absolute(path)?)
+}
+
+fn check_addr(host: &WasmHostContext, requested: &str, kind: CapabilityKind) -> anyhow::Result<()> {
+    if requested.trim().is_empty() {
+        anyhow::bail!("capability address must not be empty");
+    }
+    if requested.trim() != requested {
+        anyhow::bail!("capability address must not be padded");
+    }
+    for capability in &host.capabilities {
+        let allowed = match (kind, capability) {
+            (CapabilityKind::TcpConnect, CapabilityConfig::TcpConnect { addr })
+            | (CapabilityKind::TcpListen, CapabilityConfig::TcpListen { addr }) => addr,
+            _ => continue,
+        };
+        if requested == allowed {
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "plugin `{}` lacks capability for address {}",
+        host.plugin,
+        requested
+    )
+}
+
+fn check_timer(host: &WasmHostContext) -> anyhow::Result<()> {
+    if host
+        .capabilities
+        .iter()
+        .any(|capability| matches!(capability, CapabilityConfig::Timer))
+    {
+        Ok(())
+    } else {
+        anyhow::bail!("plugin `{}` lacks timer capability", host.plugin)
+    }
+}
+
+fn tcp_request(addr: &str, bytes: &[u8], timeout_ms: u64) -> anyhow::Result<Vec<u8>> {
+    if timeout_ms == 0 {
+        anyhow::bail!("tcp timeout must be positive");
+    }
+    if timeout_ms > MAX_WASM_TCP_TIMEOUT_MS {
+        anyhow::bail!("tcp timeout must be at most {MAX_WASM_TCP_TIMEOUT_MS} ms");
+    }
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut stream = connect_tcp(addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    stream.write_all(bytes)?;
+    stream.shutdown(Shutdown::Write)?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    Ok(response)
+}
+
+fn connect_tcp(addr: &str, timeout: Duration) -> anyhow::Result<TcpStream> {
+    let mut resolved = false;
+    let mut last_error = None;
+    for addr in addr.to_socket_addrs()? {
+        resolved = true;
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    if !resolved {
+        anyhow::bail!("tcp address did not resolve");
+    }
+    Err(last_error
+        .unwrap_or_else(|| std::io::Error::other("tcp connect failed"))
+        .into())
+}
+
+fn tcp_echo(addr: &str, max_connections: u64) -> anyhow::Result<String> {
+    if max_connections == 0 {
+        anyhow::bail!("tcp max connections must be positive");
+    }
+    if max_connections > MAX_WASM_TCP_ECHO_CONNECTIONS {
+        anyhow::bail!("tcp max connections must be at most {MAX_WASM_TCP_ECHO_CONNECTIONS}");
+    }
+    if addr_requests_ephemeral_port(addr) {
+        anyhow::bail!("tcp listen address must not use port 0");
+    }
+    let max_connections = usize::try_from(max_connections)?;
+    let listener = TcpListener::bind(addr)?;
+    let local_addr = listener.local_addr()?.to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(max_connections) {
+            let Ok(mut stream) = stream else {
+                break;
+            };
+            let mut buf = Vec::new();
+            if stream.read_to_end(&mut buf).is_ok() {
+                let _ = stream.write_all(&buf);
+            }
+        }
+    });
+    Ok(local_addr)
+}
+
+fn addr_requests_ephemeral_port(addr: &str) -> bool {
+    addr.rsplit_once(':').is_some_and(|(_, port)| port == "0")
+}
+
+fn write_file_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = write_host_temp_file(path, bytes)?;
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+fn write_host_temp_file(path: &Path, bytes: &[u8]) -> anyhow::Result<PathBuf> {
+    for attempt in 0..1000 {
+        let tmp = host_temp_file_path(path, attempt);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(mut file) => {
+                if let Err(err) = file.write_all(bytes) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(err.into());
+                }
+                return Ok(tmp);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    anyhow::bail!("could not create host temporary file")
+}
+
+fn host_temp_file_path(path: &Path, attempt: u16) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(
+        path.file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("cubex-host")),
+    );
+    name.push(format!(".{attempt}.tmp"));
+    path.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -1357,11 +1725,179 @@ to = ["policy"]
                 working_dir: None,
                 args: Vec::new(),
                 autostart: false,
+                capabilities: Vec::new(),
             }],
             ..Config::default()
         };
 
         assert!(Engine::from_config(config).is_ok());
+    }
+
+    #[test]
+    fn process_plugin_capabilities_are_rejected() {
+        let mut plugin = plugin("print");
+        plugin.capabilities.push(CapabilityConfig::Timer);
+        let config = Config {
+            plugins: vec![plugin],
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            Engine::from_config(config),
+            Err(Error::InvalidConfig(message))
+                if message == "plugin.capabilities require plugin.wasm"
+        ));
+    }
+
+    #[test]
+    fn wasm_host_file_request_path_must_not_be_padded() {
+        let dir = std::env::temp_dir().join(format!("cubex-wasm-cap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let state = WasmStoreState {
+            limits: wasm_store_limits(),
+            host: WasmHostContext {
+                plugin: "wasm".into(),
+                working_dir: Some(dir.clone()),
+                capabilities: vec![CapabilityConfig::FileRead {
+                    path: dir.join("input.txt"),
+                }],
+            },
+        };
+
+        let err = handle_host_request(
+            &state,
+            HostRequest::FileRead {
+                path: " input.txt".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "capability path must not be padded");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wasm_host_address_request_must_not_be_padded() {
+        let state = WasmStoreState {
+            limits: wasm_store_limits(),
+            host: WasmHostContext {
+                plugin: "wasm".into(),
+                working_dir: None,
+                capabilities: vec![CapabilityConfig::TcpConnect {
+                    addr: "127.0.0.1:41021".into(),
+                }],
+            },
+        };
+
+        let err = handle_host_request(
+            &state,
+            HostRequest::TcpRequest {
+                addr: "127.0.0.1:41021 ".into(),
+                bytes: Vec::new(),
+                timeout_ms: 1,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "capability address must not be padded");
+    }
+
+    #[test]
+    fn wasm_host_tcp_request_timeout_is_capped() {
+        let state = WasmStoreState {
+            limits: wasm_store_limits(),
+            host: WasmHostContext {
+                plugin: "wasm".into(),
+                working_dir: None,
+                capabilities: vec![CapabilityConfig::TcpConnect {
+                    addr: "127.0.0.1:41021".into(),
+                }],
+            },
+        };
+
+        let err = handle_host_request(
+            &state,
+            HostRequest::TcpRequest {
+                addr: "127.0.0.1:41021".into(),
+                bytes: Vec::new(),
+                timeout_ms: MAX_WASM_TCP_TIMEOUT_MS + 1,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "tcp timeout must be at most 60000 ms");
+    }
+
+    #[test]
+    fn wasm_host_tcp_echo_connections_are_capped() {
+        let state = WasmStoreState {
+            limits: wasm_store_limits(),
+            host: WasmHostContext {
+                plugin: "wasm".into(),
+                working_dir: None,
+                capabilities: vec![CapabilityConfig::TcpListen {
+                    addr: "127.0.0.1:41021".into(),
+                }],
+            },
+        };
+
+        let err = handle_host_request(
+            &state,
+            HostRequest::TcpEcho {
+                addr: "127.0.0.1:41021".into(),
+                max_connections: MAX_WASM_TCP_ECHO_CONNECTIONS + 1,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "tcp max connections must be at most 1024");
+    }
+
+    #[test]
+    fn wasm_host_tcp_echo_rejects_ephemeral_port() {
+        let state = WasmStoreState {
+            limits: wasm_store_limits(),
+            host: WasmHostContext {
+                plugin: "wasm".into(),
+                working_dir: None,
+                capabilities: vec![CapabilityConfig::TcpListen {
+                    addr: "127.0.0.1:0".into(),
+                }],
+            },
+        };
+
+        let err = handle_host_request(
+            &state,
+            HostRequest::TcpEcho {
+                addr: "127.0.0.1:0".into(),
+                max_connections: 1,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "tcp listen address must not use port 0");
+    }
+
+    #[test]
+    fn wasm_host_sleep_is_capped() {
+        let state = WasmStoreState {
+            limits: wasm_store_limits(),
+            host: WasmHostContext {
+                plugin: "wasm".into(),
+                working_dir: None,
+                capabilities: vec![CapabilityConfig::Timer],
+            },
+        };
+
+        let err = handle_host_request(
+            &state,
+            HostRequest::Sleep {
+                millis: MAX_WASM_SLEEP_MS + 1,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "sleep must be at most 60000 ms");
     }
 
     #[test]
@@ -1431,6 +1967,7 @@ to = ["policy"]
                 working_dir: Some(PathBuf::from(" ")),
                 args: Vec::new(),
                 autostart: false,
+                capabilities: Vec::new(),
             }],
             ..Config::default()
         };
@@ -1461,6 +1998,10 @@ working_dir = "work"
 [[plugins]]
 name = "wasm-plugin"
 wasm = "wasm/plugin.wasm"
+
+[[plugins.capabilities]]
+kind = "file-read"
+path = "data/input.txt"
 "#,
         )
         .unwrap();
@@ -1480,6 +2021,10 @@ wasm = "wasm/plugin.wasm"
             config.plugins[1].wasm.as_deref(),
             Some(dir.join("wasm/plugin.wasm").as_path())
         );
+        let CapabilityConfig::FileRead { path } = &config.plugins[1].capabilities[0] else {
+            panic!("expected file-read capability");
+        };
+        assert_eq!(path, &dir.join("data/input.txt"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1834,6 +2379,7 @@ to = ["plugin"]
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
+                capabilities: Vec::new(),
             }],
             ..Config::default()
         })
@@ -1905,6 +2451,7 @@ to = ["plugin"]
                     working_dir: None,
                     args: Vec::new(),
                     autostart: true,
+                    capabilities: Vec::new(),
                 },
                 PluginConfig {
                     name: "bad-stop".into(),
@@ -1913,6 +2460,7 @@ to = ["plugin"]
                     working_dir: None,
                     args: Vec::new(),
                     autostart: true,
+                    capabilities: Vec::new(),
                 },
             ],
             ..Config::default()
@@ -1974,6 +2522,7 @@ to = ["plugin"]
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
+                capabilities: Vec::new(),
             }],
             ..Config::default()
         })
@@ -2020,6 +2569,7 @@ to = ["plugin"]
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
+                capabilities: Vec::new(),
             }],
             ..Config::default()
         })
@@ -2083,6 +2633,7 @@ to = ["plugin"]
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
+                capabilities: Vec::new(),
             }],
             ..Config::default()
         })
@@ -2140,6 +2691,7 @@ to = ["plugin"]
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
+                capabilities: Vec::new(),
             }],
             ..Config::default()
         })
@@ -2227,6 +2779,7 @@ to = ["plugin"]
                     working_dir: None,
                     args: Vec::new(),
                     autostart: false,
+                    capabilities: Vec::new(),
                 },
             ],
             routes: vec![RouteConfig {
@@ -2268,6 +2821,7 @@ to = ["plugin"]
             working_dir: None,
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         })
         .unwrap();
         let mut child = plugin.spawn().unwrap();
@@ -2311,6 +2865,7 @@ to = ["plugin"]
             working_dir: None,
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         })
         .unwrap();
         let error = plugin
@@ -2369,6 +2924,7 @@ to = ["plugin"]
                 working_dir: None,
                 args: Vec::new(),
                 autostart: true,
+                capabilities: Vec::new(),
             }],
             ..Config::default()
         })
@@ -2387,6 +2943,7 @@ to = ["plugin"]
             working_dir: None,
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         }
     }
 

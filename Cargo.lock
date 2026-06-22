@@ -594,6 +594,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cubex-wasm-file-sink-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cubex-wasm-plugin-sdk",
+]
+
+[[package]]
+name = "cubex-wasm-file-source-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cubex-wasm-plugin-sdk",
+]
+
+[[package]]
 name = "cubex-wasm-hello-plugin"
 version = "0.1.0"
 dependencies = [
@@ -626,6 +642,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cubex-wasm-record-store-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cubex-wasm-plugin-sdk",
+]
+
+[[package]]
 name = "cubex-wasm-register-bank-plugin"
 version = "0.1.0"
 dependencies = [
@@ -648,6 +672,30 @@ dependencies = [
  "anyhow",
  "cubex-wasm-plugin-sdk",
  "sha2",
+]
+
+[[package]]
+name = "cubex-wasm-tcp-client-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cubex-wasm-plugin-sdk",
+]
+
+[[package]]
+name = "cubex-wasm-tcp-echo-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cubex-wasm-plugin-sdk",
+]
+
+[[package]]
+name = "cubex-wasm-timer-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cubex-wasm-plugin-sdk",
 ]
 
 [[package]]

@@ -22,7 +22,9 @@ Plugins run either as separate processes or as Wasm modules. Process plugins use
 stdin/stdout frames. Wasm plugins export `cubex_plugin_alloc`,
 `cubex_plugin_free`, and `cubex_plugin_handle`; the host passes encoded
 `PluginRequest` bytes through guest memory and decodes `PluginResponse` bytes
-from the returned buffer.
+from the returned buffer. Wasm plugins that need host IO import
+`cubex.host_call`, which carries encoded host-capability requests through the
+same guest-memory pattern.
 
 Routing is declarative. A route can match on source, topic, and payload kind,
 then fan out to one or more plugin targets.
@@ -45,6 +47,5 @@ patterns through the same message protocol.
 
 Network and cryptographic behavior follow the same rule. TCP and SHA-256 are
 ordinary plugins, so the runtime remains a scheduler and protocol host rather
-than a pile of special cases. Current Wasm examples cover pure compute and
-in-memory state; file, TCP, timer, and durable store access stay in process
-plugins until a capability layer exists.
+than a pile of special cases. Wasm file, TCP, timer, and durable record-store
+plugins use explicit capabilities before the host performs those operations.

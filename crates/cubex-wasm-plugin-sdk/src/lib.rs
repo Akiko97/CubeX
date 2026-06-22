@@ -1,5 +1,6 @@
 pub use cubex_protocol::{
-    Control, MAX_FRAME_SIZE, Message, Payload, PluginRequest, PluginResponse, ProtocolError, Value,
+    Control, HostPayload, HostRequest, HostResponse, MAX_FRAME_SIZE, Message, Payload,
+    PluginRequest, PluginResponse, ProtocolError, Value,
 };
 
 pub trait Plugin {
@@ -40,30 +41,167 @@ fn normalize_error_text(text: String) -> String {
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn cubex_plugin_alloc(len: i32) -> i32 {
+    if len <= 0 {
+        return 0;
+    }
+    let mut bytes = Vec::<u8>::with_capacity(len as usize);
+    let ptr = bytes.as_mut_ptr() as i32;
+    std::mem::forget(bytes);
+    ptr
+}
+
+/// # Safety
+///
+/// `ptr` and `len` must come from `cubex_plugin_alloc` and must not be freed twice.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cubex_plugin_free(ptr: i32, len: i32) {
+    if ptr != 0 && len > 0 {
+        drop(unsafe { Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize) });
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[link(wasm_import_module = "cubex")]
+unsafe extern "C" {
+    #[link_name = "host_call"]
+    fn cubex_host_call(ptr: i32, len: i32) -> i64;
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub fn host_call(request: HostRequest) -> anyhow::Result<HostPayload> {
+    let input = cubex_protocol::encode(&request)?.into_boxed_slice();
+    let len = i32::try_from(input.len())
+        .map_err(|_| cubex_protocol::ProtocolError::FrameTooLarge(u32::MAX))?;
+    let packed = unsafe { cubex_host_call(input.as_ptr() as i32, len) } as u64;
+    let output_ptr = (packed & u64::from(u32::MAX)) as u32;
+    let output_len = (packed >> 32) as u32;
+    if output_len > MAX_FRAME_SIZE {
+        anyhow::bail!("{}", ProtocolError::FrameTooLarge(output_len));
+    }
+    if output_ptr == 0 || output_len == 0 {
+        anyhow::bail!("host call returned an empty response");
+    }
+    let output = unsafe {
+        Vec::from_raw_parts(
+            output_ptr as *mut u8,
+            output_len as usize,
+            output_len as usize,
+        )
+    };
+    let response: HostResponse = cubex_protocol::decode(&output)?;
+    if let Some(error) = response.error {
+        anyhow::bail!(error);
+    }
+    Ok(response.payload)
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub fn host_call(_request: HostRequest) -> anyhow::Result<HostPayload> {
+    anyhow::bail!("host calls require the CubeX wasm runtime")
+}
+
+pub fn read_file(path: impl Into<String>) -> anyhow::Result<Vec<u8>> {
+    match host_call(HostRequest::FileRead { path: path.into() })? {
+        HostPayload::Bytes(bytes) => Ok(bytes),
+        _ => anyhow::bail!("host returned non-bytes file response"),
+    }
+}
+
+pub fn write_file(path: impl Into<String>, bytes: Vec<u8>) -> anyhow::Result<()> {
+    match host_call(HostRequest::FileWrite {
+        path: path.into(),
+        bytes,
+    })? {
+        HostPayload::Unit => Ok(()),
+        _ => anyhow::bail!("host returned non-unit file response"),
+    }
+}
+
+pub fn tcp_request(
+    addr: impl Into<String>,
+    bytes: Vec<u8>,
+    timeout_ms: u64,
+) -> anyhow::Result<Vec<u8>> {
+    match host_call(HostRequest::TcpRequest {
+        addr: addr.into(),
+        bytes,
+        timeout_ms,
+    })? {
+        HostPayload::Bytes(bytes) => Ok(bytes),
+        _ => anyhow::bail!("host returned non-bytes tcp response"),
+    }
+}
+
+pub fn tcp_echo(addr: impl Into<String>, max_connections: u64) -> anyhow::Result<String> {
+    match host_call(HostRequest::TcpEcho {
+        addr: addr.into(),
+        max_connections,
+    })? {
+        HostPayload::Text(addr) => Ok(addr),
+        _ => anyhow::bail!("host returned non-text tcp response"),
+    }
+}
+
+pub fn sleep_ms(millis: u64) -> anyhow::Result<()> {
+    match host_call(HostRequest::Sleep { millis })? {
+        HostPayload::Unit => Ok(()),
+        _ => anyhow::bail!("host returned non-unit sleep response"),
+    }
+}
+
+pub fn record_put(
+    path: impl Into<String>,
+    key: impl Into<String>,
+    message: Message,
+) -> anyhow::Result<()> {
+    match host_call(HostRequest::RecordPut {
+        path: path.into(),
+        key: key.into(),
+        message,
+    })? {
+        HostPayload::Unit => Ok(()),
+        _ => anyhow::bail!("host returned non-unit record response"),
+    }
+}
+
+pub fn record_get(
+    path: impl Into<String>,
+    key: impl Into<String>,
+) -> anyhow::Result<Option<Message>> {
+    match host_call(HostRequest::RecordGet {
+        path: path.into(),
+        key: key.into(),
+    })? {
+        HostPayload::Message(message) => Ok(message),
+        _ => anyhow::bail!("host returned non-message record response"),
+    }
+}
+
+pub fn record_delete(path: impl Into<String>, key: impl Into<String>) -> anyhow::Result<bool> {
+    match host_call(HostRequest::RecordDelete {
+        path: path.into(),
+        key: key.into(),
+    })? {
+        HostPayload::Bool(deleted) => Ok(deleted),
+        _ => anyhow::bail!("host returned non-bool record response"),
+    }
+}
+
+pub fn record_list(path: impl Into<String>) -> anyhow::Result<Vec<String>> {
+    match host_call(HostRequest::RecordList { path: path.into() })? {
+        HostPayload::StringList(keys) => Ok(keys),
+        _ => anyhow::bail!("host returned non-list record response"),
+    }
+}
+
 #[macro_export]
 macro_rules! export_plugin {
     ($plugin:expr) => {
         std::thread_local! {
             static CUBEX_PLUGIN: std::cell::RefCell<Box<dyn $crate::Plugin>> =
                 std::cell::RefCell::new(Box::new($plugin));
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn cubex_plugin_alloc(len: i32) -> i32 {
-            if len <= 0 {
-                return 0;
-            }
-            let mut bytes = Vec::<u8>::with_capacity(len as usize);
-            let ptr = bytes.as_mut_ptr() as i32;
-            std::mem::forget(bytes);
-            ptr
-        }
-
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn cubex_plugin_free(ptr: i32, len: i32) {
-            if ptr != 0 && len > 0 {
-                drop(unsafe { Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize) });
-            }
         }
 
         #[unsafe(no_mangle)]

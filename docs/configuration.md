@@ -52,7 +52,27 @@ Plugin and route names must be unique.
 
 `working_dir` is optional. When present, it must be non-empty and non-blank. It
 is also resolved relative to the config file and becomes the child plugin process
-working directory.
+working directory. Wasm host capabilities also resolve relative plugin paths
+against it.
+
+Wasm plugins may declare host capabilities. Process plugins cannot use this
+field. Capability paths are resolved relative to the config file:
+
+```toml
+[[plugins]]
+name = "wasm-file-source"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_file_source_plugin.wasm"
+working_dir = "."
+args = ["input.txt", "file.read", "text"]
+
+[[plugins.capabilities]]
+kind = "file-read"
+path = "input.txt"
+```
+
+Supported capability kinds are `file-read`, `file-write`, `tcp-connect`,
+`tcp-listen`, `timer`, and `record-store`. File and record-store capabilities
+use `path`; TCP capabilities use `addr`; timer has no extra fields.
 
 `[store]` is optional. Setting non-empty, non-blank `store.path` enables an
 append-only binary message log for emitted messages. `replay_on_start = true`
@@ -86,7 +106,7 @@ cargo run -p cubex-cli -- check --strict -c examples/hello/cubex.toml
 
 Use `--strict` after building plugins to also verify configured plugin commands
 exist and are executable, configured wasm files exist, any `working_dir` entries
-are directories, and `store.path` does not point at a directory or through a file parent. If
-`store.path` already exists, strict checks also verify that it is a readable
-CubeX event log.
+are directories, and `store.path` does not point at a directory or through a file
+parent. If `store.path` already exists, strict checks also verify that it is a
+readable CubeX event log.
 `run --strict` applies the same file checks before starting plugins.

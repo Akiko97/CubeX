@@ -100,6 +100,77 @@ pub struct PluginResponse {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostRequest {
+    FileRead {
+        path: String,
+    },
+    FileWrite {
+        path: String,
+        bytes: Vec<u8>,
+    },
+    TcpRequest {
+        addr: String,
+        bytes: Vec<u8>,
+        timeout_ms: u64,
+    },
+    TcpEcho {
+        addr: String,
+        max_connections: u64,
+    },
+    Sleep {
+        millis: u64,
+    },
+    RecordPut {
+        path: String,
+        key: String,
+        message: Message,
+    },
+    RecordGet {
+        path: String,
+        key: String,
+    },
+    RecordDelete {
+        path: String,
+        key: String,
+    },
+    RecordList {
+        path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostResponse {
+    pub payload: HostPayload,
+    pub error: Option<String>,
+}
+
+impl HostResponse {
+    pub fn ok(payload: HostPayload) -> Self {
+        Self {
+            payload,
+            error: None,
+        }
+    }
+
+    pub fn error(reason: impl Into<String>) -> Self {
+        Self {
+            payload: HostPayload::Unit,
+            error: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostPayload {
+    Unit,
+    Bytes(Vec<u8>),
+    Text(String),
+    Bool(bool),
+    Message(Option<Message>),
+    StringList(Vec<String>),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
     #[error("frame is too large: {0} bytes")]

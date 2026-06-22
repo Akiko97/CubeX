@@ -173,6 +173,12 @@ name = "wasm-my-plugin"
 wasm = "./target/wasm32-unknown-unknown/debug/cubex_wasm_my_plugin.wasm"
 ```
 
+Wasm plugins that need host IO use one imported ABI function:
+`cubex.host_call(ptr, len) -> packed(ptr, len)`. The SDK wraps this with
+helpers such as `read_file`, `write_file`, `tcp_request`, `tcp_echo`, `sleep_ms`,
+and `record_*`. Each call is checked against the plugin's configured
+capabilities before the host performs the operation.
+
 Plugin `args` come from the `system.start` control message. The host does not pass
 them as process argv. Keep stdout for binary protocol frames; return user-visible
 logs through `PluginResponse.logs`. The host also sends `system.stop` during

@@ -1,0 +1,31 @@
+[engine]
+name = "wasm-process-hello-example"
+max_messages = 32
+
+[[plugins]]
+name = "hello"
+command = "../../target/debug/cubex-hello-plugin"
+args = ["CubeX"]
+autostart = true
+
+[[plugins]]
+name = "wasm-echo"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_echo_plugin.wasm"
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "process-greeting-to-wasm-echo-and-print"
+source = "hello"
+topic = "hello.greeting"
+payload = "text"
+to = ["wasm-echo", "print"]
+
+[[routes]]
+name = "wasm-echo-to-process-print"
+source = "wasm-echo"
+topic = "echo.reply"
+payload = "text"
+to = ["print"]
