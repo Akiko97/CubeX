@@ -151,6 +151,13 @@ pub fn sleep_ms(millis: u64) -> anyhow::Result<()> {
     }
 }
 
+pub fn random_bytes(len: u32) -> anyhow::Result<Vec<u8>> {
+    match host_call(HostRequest::RandomBytes { len })? {
+        HostPayload::Bytes(bytes) => Ok(bytes),
+        _ => anyhow::bail!("host returned non-bytes random response"),
+    }
+}
+
 pub fn record_put(
     path: impl Into<String>,
     key: impl Into<String>,

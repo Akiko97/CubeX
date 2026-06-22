@@ -121,6 +121,9 @@ pub enum HostRequest {
     Sleep {
         millis: u64,
     },
+    RandomBytes {
+        len: u32,
+    },
     RecordPut {
         path: String,
         key: String,

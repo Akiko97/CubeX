@@ -28,9 +28,9 @@ same guest-memory pattern.
 
 Routing is declarative. A route can match on source, topic, and payload kind,
 then fan out to one or more plugin targets.
-The host assigns the source of every emitted plugin message before routing, so
-plugins cannot impersonate other plugins by filling the `source` field. Control
-payloads are host-owned and are rejected when emitted by plugins.
+The host assigns the ID and source of every emitted plugin message before
+routing, so plugins cannot impersonate other plugins or reuse message IDs.
+Control payloads are host-owned and are rejected when emitted by plugins.
 
 Durability is split deliberately: the runtime can append emitted messages to an
 event log, while plugins can use `cubex-store` for domain records. Both formats

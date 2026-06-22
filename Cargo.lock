@@ -428,6 +428,7 @@ dependencies = [
  "anyhow",
  "cubex-protocol",
  "cubex-store",
+ "getrandom 0.3.4",
  "serde",
  "thiserror 2.0.18",
  "toml 0.9.12+spec-1.1.0",

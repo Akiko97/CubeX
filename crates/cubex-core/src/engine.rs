@@ -24,6 +24,7 @@ const WASM_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WASM_SLEEP_MS: u64 = 60_000;
 const MAX_WASM_TCP_TIMEOUT_MS: u64 = 60_000;
 const MAX_WASM_TCP_ECHO_CONNECTIONS: u64 = 1024;
+const MAX_WASM_RANDOM_BYTES: u32 = 64 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunReport {
@@ -290,6 +291,7 @@ fn normalize_plugin_messages(name: &str, messages: &mut [Message]) -> Result<()>
                 reason: "control payloads are reserved for host messages".into(),
             });
         }
+        message.id = uuid::Uuid::new_v4();
         message.source = name.to_string();
     }
     Ok(())
@@ -896,6 +898,7 @@ fn handle_host_request(
             std::thread::sleep(Duration::from_millis(millis));
             Ok(HostPayload::Unit)
         }
+        HostRequest::RandomBytes { len } => Ok(HostPayload::Bytes(random_bytes(len)?)),
         HostRequest::RecordPut { path, key, message } => {
             let path = checked_path(&state.host, &path, CapabilityKind::RecordStore)?;
             cubex_store::RecordStore::new(path).put(key, message)?;
@@ -1036,6 +1039,15 @@ fn tcp_request(addr: &str, bytes: &[u8], timeout_ms: u64) -> anyhow::Result<Vec<
     let mut response = Vec::new();
     stream.read_to_end(&mut response)?;
     Ok(response)
+}
+
+fn random_bytes(len: u32) -> anyhow::Result<Vec<u8>> {
+    if len > MAX_WASM_RANDOM_BYTES {
+        anyhow::bail!("random byte length must be at most {MAX_WASM_RANDOM_BYTES}");
+    }
+    let mut bytes = vec![0_u8; usize::try_from(len)?];
+    getrandom::fill(&mut bytes).map_err(|err| anyhow::anyhow!("random bytes failed: {err}"))?;
+    Ok(bytes)
 }
 
 fn connect_tcp(addr: &str, timeout: Duration) -> anyhow::Result<TcpStream> {
@@ -1359,6 +1371,31 @@ to = ["policy"]
             Err(Error::InvalidPluginMessage { plugin, reason })
                 if plugin == "plugin" && reason == "id must not be nil"
         ));
+    }
+
+    #[test]
+    fn emitted_message_ids_are_host_assigned() {
+        let plugin_id = uuid::Uuid::from_u128(1);
+        let mut messages = vec![
+            Message {
+                id: plugin_id,
+                source: "spoofed".into(),
+                topic: "topic".into(),
+                payload: Payload::Text("first".into()),
+            },
+            Message {
+                id: plugin_id,
+                source: "spoofed".into(),
+                topic: "topic".into(),
+                payload: Payload::Text("second".into()),
+            },
+        ];
+
+        normalize_plugin_messages("plugin", &mut messages).unwrap();
+
+        assert_ne!(messages[0].id, plugin_id);
+        assert_ne!(messages[1].id, plugin_id);
+        assert_ne!(messages[0].id, messages[1].id);
     }
 
     #[test]
@@ -1898,6 +1935,44 @@ to = ["policy"]
         .unwrap_err();
 
         assert_eq!(err.to_string(), "sleep must be at most 60000 ms");
+    }
+
+    #[test]
+    fn wasm_host_random_bytes_are_available_without_capability() {
+        let state = WasmStoreState {
+            limits: wasm_store_limits(),
+            host: WasmHostContext {
+                plugin: "wasm".into(),
+                working_dir: None,
+                capabilities: Vec::new(),
+            },
+        };
+
+        let payload = handle_host_request(&state, HostRequest::RandomBytes { len: 32 }).unwrap();
+
+        assert!(matches!(payload, HostPayload::Bytes(bytes) if bytes.len() == 32));
+    }
+
+    #[test]
+    fn wasm_host_random_bytes_are_capped() {
+        let state = WasmStoreState {
+            limits: wasm_store_limits(),
+            host: WasmHostContext {
+                plugin: "wasm".into(),
+                working_dir: None,
+                capabilities: Vec::new(),
+            },
+        };
+
+        let err = handle_host_request(
+            &state,
+            HostRequest::RandomBytes {
+                len: MAX_WASM_RANDOM_BYTES + 1,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "random byte length must be at most 65536");
     }
 
     #[test]
