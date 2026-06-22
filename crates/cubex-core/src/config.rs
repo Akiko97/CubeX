@@ -40,12 +40,36 @@ impl Config {
             {
                 plugin.command = base_dir.join(&plugin.command);
             }
+            if let Some(wasm) = &mut plugin.wasm
+                && !wasm.as_os_str().is_empty()
+                && !path_is_blank(wasm)
+                && wasm.is_relative()
+            {
+                *wasm = base_dir.join(&wasm);
+            }
             if let Some(working_dir) = &mut plugin.working_dir
                 && !working_dir.as_os_str().is_empty()
                 && !path_is_blank(working_dir)
                 && working_dir.is_relative()
             {
                 *working_dir = base_dir.join(&working_dir);
+            }
+            for capability in &mut plugin.capabilities {
+                match capability {
+                    CapabilityConfig::FileRead { path }
+                    | CapabilityConfig::FileWrite { path }
+                    | CapabilityConfig::RecordStore { path } => {
+                        if !path.as_os_str().is_empty()
+                            && !path_is_blank(path)
+                            && path.is_relative()
+                        {
+                            *path = base_dir.join(&path);
+                        }
+                    }
+                    CapabilityConfig::TcpConnect { .. }
+                    | CapabilityConfig::TcpListen { .. }
+                    | CapabilityConfig::Timer => {}
+                }
             }
         }
         if let Some(path) = &mut self.store.path
@@ -85,13 +109,29 @@ pub struct StoreConfig {
 #[serde(deny_unknown_fields)]
 pub struct PluginConfig {
     pub name: String,
+    #[serde(default)]
     pub command: PathBuf,
+    #[serde(default)]
+    pub wasm: Option<PathBuf>,
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub autostart: bool,
+    #[serde(default)]
+    pub capabilities: Vec<CapabilityConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum CapabilityConfig {
+    FileRead { path: PathBuf },
+    FileWrite { path: PathBuf },
+    TcpConnect { addr: String },
+    TcpListen { addr: String },
+    Timer,
+    RecordStore { path: PathBuf },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,15 +210,40 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
                 plugin.name
             )));
         }
-        if plugin.command.as_os_str().is_empty() {
-            return Err(Error::InvalidConfig(
-                "plugin.command must not be empty".into(),
-            ));
-        }
-        if plugin.command.to_string_lossy().trim().is_empty() {
+        if !plugin.command.as_os_str().is_empty() && path_is_blank(&plugin.command) {
             return Err(Error::InvalidConfig(
                 "plugin.command must not be blank".into(),
             ));
+        }
+        if plugin
+            .wasm
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(Error::InvalidConfig("plugin.wasm must not be empty".into()));
+        }
+        if plugin.wasm.as_ref().is_some_and(|path| path_is_blank(path)) {
+            return Err(Error::InvalidConfig("plugin.wasm must not be blank".into()));
+        }
+        let has_command = !plugin.command.as_os_str().is_empty();
+        let has_wasm = plugin.wasm.is_some();
+        if !has_command && !has_wasm {
+            return Err(Error::InvalidConfig(
+                "plugin.command or plugin.wasm must be set".into(),
+            ));
+        }
+        if has_command && has_wasm {
+            return Err(Error::InvalidConfig(
+                "plugin.command and plugin.wasm are mutually exclusive".into(),
+            ));
+        }
+        if has_command && !plugin.capabilities.is_empty() {
+            return Err(Error::InvalidConfig(
+                "plugin.capabilities require plugin.wasm".into(),
+            ));
+        }
+        for capability in &plugin.capabilities {
+            validate_capability(&plugin.name, capability)?;
         }
         if plugin
             .working_dir
@@ -325,6 +390,39 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_capability(plugin: &str, capability: &CapabilityConfig) -> Result<()> {
+    match capability {
+        CapabilityConfig::FileRead { path }
+        | CapabilityConfig::FileWrite { path }
+        | CapabilityConfig::RecordStore { path } => {
+            if path.as_os_str().is_empty() {
+                return Err(Error::InvalidConfig(format!(
+                    "plugin `{plugin}` capability path must not be empty"
+                )));
+            }
+            if path_is_blank(path) {
+                return Err(Error::InvalidConfig(format!(
+                    "plugin `{plugin}` capability path must not be blank"
+                )));
+            }
+        }
+        CapabilityConfig::TcpConnect { addr } | CapabilityConfig::TcpListen { addr } => {
+            if addr.trim().is_empty() {
+                return Err(Error::InvalidConfig(format!(
+                    "plugin `{plugin}` capability addr must not be empty"
+                )));
+            }
+            if addr.trim() != addr {
+                return Err(Error::InvalidConfig(format!(
+                    "plugin `{plugin}` capability addr must not be padded"
+                )));
+            }
+        }
+        CapabilityConfig::Timer => {}
+    }
     Ok(())
 }
 

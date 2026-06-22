@@ -161,6 +161,23 @@ fn check_runtime_files(config: &cubex_core::Config) -> anyhow::Result<()> {
                 working_dir.display()
             );
         }
+        if let Some(wasm) = &plugin.wasm {
+            if !wasm.exists() {
+                anyhow::bail!(
+                    "plugin `{}` wasm does not exist: {}",
+                    plugin.name,
+                    wasm.display()
+                );
+            }
+            if !wasm.is_file() {
+                anyhow::bail!(
+                    "plugin `{}` wasm is not a file: {}",
+                    plugin.name,
+                    wasm.display()
+                );
+            }
+            continue;
+        }
         if !plugin.command.exists() {
             anyhow::bail!(
                 "plugin `{}` command does not exist: {}",
@@ -299,9 +316,11 @@ mod tests {
         config.plugins.push(cubex_core::PluginConfig {
             name: "plugin".into(),
             command: "unused".into(),
+            wasm: None,
             working_dir: Some(path.clone()),
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         });
 
         let error = check_runtime_files(&config).unwrap_err().to_string();
@@ -320,13 +339,59 @@ mod tests {
         config.plugins.push(cubex_core::PluginConfig {
             name: "plugin".into(),
             command: path.clone(),
+            wasm: None,
             working_dir: None,
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         });
 
         let error = check_runtime_files(&config).unwrap_err().to_string();
         assert!(error.contains("command is not a file"));
+
+        let _ = std::fs::remove_dir(path);
+    }
+
+    #[test]
+    fn strict_check_rejects_missing_wasm() {
+        let path = std::env::temp_dir().join(format!("cubex-missing-wasm-{}", unique_id()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&path);
+
+        let mut config = cubex_core::Config::default();
+        config.plugins.push(cubex_core::PluginConfig {
+            name: "wasm".into(),
+            command: PathBuf::new(),
+            wasm: Some(path.clone()),
+            working_dir: None,
+            args: Vec::new(),
+            autostart: false,
+            capabilities: Vec::new(),
+        });
+
+        let error = check_runtime_files(&config).unwrap_err().to_string();
+        assert!(error.contains("wasm does not exist"));
+    }
+
+    #[test]
+    fn strict_check_rejects_wasm_directory() {
+        let path = std::env::temp_dir().join(format!("cubex-wasm-dir-{}", unique_id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir(&path).unwrap();
+
+        let mut config = cubex_core::Config::default();
+        config.plugins.push(cubex_core::PluginConfig {
+            name: "wasm".into(),
+            command: PathBuf::new(),
+            wasm: Some(path.clone()),
+            working_dir: None,
+            args: Vec::new(),
+            autostart: false,
+            capabilities: Vec::new(),
+        });
+
+        let error = check_runtime_files(&config).unwrap_err().to_string();
+        assert!(error.contains("wasm is not a file"));
 
         let _ = std::fs::remove_dir(path);
     }
@@ -378,9 +443,11 @@ mod tests {
         config.plugins.push(cubex_core::PluginConfig {
             name: "plugin".into(),
             command: path.clone(),
+            wasm: None,
             working_dir: None,
             args: Vec::new(),
             autostart: false,
+            capabilities: Vec::new(),
         });
 
         let error = check_runtime_files(&config).unwrap_err().to_string();

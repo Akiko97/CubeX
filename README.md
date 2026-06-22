@@ -1,7 +1,8 @@
 # CubeX
 
 CubeX is a Rust workspace for a message-driven runtime with TOML configuration,
-binary message frames, route-based dispatch, and isolated process plugins.
+binary message frames, route-based dispatch, process plugins, and Wasm sandbox
+plugins.
 
 Run the full local check:
 
@@ -16,6 +17,13 @@ cargo build --workspace
 cargo run -p cubex-cli -- check -c examples/hello/cubex.toml
 cargo run -p cubex-cli -- check --strict -c examples/hello/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/hello/cubex.toml
+```
+
+Run the Wasm hello example:
+
+```sh
+cargo build --target wasm32-unknown-unknown -p cubex-wasm-hello-plugin -p cubex-wasm-echo-plugin -p cubex-wasm-print-plugin
+cargo run -p cubex-cli -- run --strict -c examples/wasm-hello/cubex.toml
 ```
 
 Run the record store example:

@@ -1,0 +1,53 @@
+[engine]
+name = "wasm-bytes-flow-example"
+max_messages = 32
+
+[[plugins]]
+name = "wasm-file-source"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_file_source_plugin.wasm"
+working_dir = "."
+args = ["input.bin", "file.bytes", "bytes"]
+autostart = true
+
+[[plugins.capabilities]]
+kind = "file-read"
+path = "input.bin"
+
+[[plugins]]
+name = "wasm-echo"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_echo_plugin.wasm"
+
+[[plugins]]
+name = "wasm-file-sink"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_file_sink_plugin.wasm"
+working_dir = "."
+args = ["output.bin"]
+
+[[plugins.capabilities]]
+kind = "file-write"
+path = "output.bin"
+
+[[plugins]]
+name = "wasm-print"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm"
+
+[[routes]]
+name = "wasm-bytes-to-echo"
+source = "wasm-file-source"
+topic = "file.bytes"
+payload = "bytes"
+to = ["wasm-echo"]
+
+[[routes]]
+name = "wasm-echo-to-sink"
+source = "wasm-echo"
+topic = "echo.reply"
+payload = "bytes"
+to = ["wasm-file-sink"]
+
+[[routes]]
+name = "wasm-sink-ack-to-print"
+source = "wasm-file-sink"
+topic = "file.written"
+payload = "text"
+to = ["wasm-print"]

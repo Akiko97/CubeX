@@ -3,6 +3,12 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use uuid::Uuid;
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
+
 pub const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,7 +22,7 @@ pub struct Message {
 impl Message {
     pub fn new(source: impl Into<String>, topic: impl Into<String>, payload: Payload) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: new_message_id(),
             source: source.into(),
             topic: topic.into(),
             payload,
@@ -26,6 +32,16 @@ impl Message {
     pub fn payload_kind(&self) -> PayloadKind {
         self.payload.kind()
     }
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn new_message_id() -> Uuid {
+    Uuid::new_v4()
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn new_message_id() -> Uuid {
+    Uuid::from_u128(NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed) as u128)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +98,77 @@ pub struct PluginResponse {
     pub messages: Vec<Message>,
     pub logs: Vec<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostRequest {
+    FileRead {
+        path: String,
+    },
+    FileWrite {
+        path: String,
+        bytes: Vec<u8>,
+    },
+    TcpRequest {
+        addr: String,
+        bytes: Vec<u8>,
+        timeout_ms: u64,
+    },
+    TcpEcho {
+        addr: String,
+        max_connections: u64,
+    },
+    Sleep {
+        millis: u64,
+    },
+    RecordPut {
+        path: String,
+        key: String,
+        message: Message,
+    },
+    RecordGet {
+        path: String,
+        key: String,
+    },
+    RecordDelete {
+        path: String,
+        key: String,
+    },
+    RecordList {
+        path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostResponse {
+    pub payload: HostPayload,
+    pub error: Option<String>,
+}
+
+impl HostResponse {
+    pub fn ok(payload: HostPayload) -> Self {
+        Self {
+            payload,
+            error: None,
+        }
+    }
+
+    pub fn error(reason: impl Into<String>) -> Self {
+        Self {
+            payload: HostPayload::Unit,
+            error: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostPayload {
+    Unit,
+    Bytes(Vec<u8>),
+    Text(String),
+    Bool(bool),
+    Message(Option<Message>),
+    StringList(Vec<String>),
 }
 
 #[derive(Debug, thiserror::Error)]

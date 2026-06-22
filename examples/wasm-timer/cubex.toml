@@ -1,0 +1,23 @@
+[engine]
+name = "wasm-timer-example"
+max_messages = 32
+
+[[plugins]]
+name = "wasm-timer"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_timer_plugin.wasm"
+args = ["3", "0", "timer.tick"]
+autostart = true
+
+[[plugins.capabilities]]
+kind = "timer"
+
+[[plugins]]
+name = "wasm-print"
+wasm = "../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm"
+
+[[routes]]
+name = "wasm-ticks-to-print"
+source = "wasm-timer"
+topic = "timer.tick"
+payload = "record"
+to = ["wasm-print"]
