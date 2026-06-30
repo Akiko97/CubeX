@@ -1,0 +1,2 @@
+fn from_topic(src, t, kind) =
+  source == src && topic == t && payload == kind

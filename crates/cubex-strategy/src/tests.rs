@@ -303,3 +303,184 @@ strategy "paths" {
 
     let _ = std::fs::remove_dir_all(temp);
 }
+
+#[test]
+fn compiles_file_level_includes() {
+    let temp = test_temp_dir("include");
+    let common = temp.join("common");
+    std::fs::create_dir_all(&common).unwrap();
+
+    let main = temp.join("cubex.cx");
+    let plugins = common.join("plugins.cx");
+    let predicates = common.join("predicates.cx");
+
+    std::fs::write(
+        &plugins,
+        r#"
+plugin hello = process("bin/hello") {
+  working_dir = "."
+  autostart = true
+}
+
+plugin print = process("bin/print")
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &predicates,
+        r#"
+fn from_topic(src, t, kind) =
+  source == src && topic == t && payload == kind
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &main,
+        r#"
+include "common/plugins.cx"
+include "common/predicates.cx"
+
+strategy "included" {
+  route greeting-to-print =
+    from_topic(hello, "hello.greeting", text) -> [print]
+}
+"#,
+    )
+    .unwrap();
+
+    let config = compile_file(&main).unwrap();
+
+    assert_eq!(config.engine.name, "included");
+    assert_eq!(config.plugins.len(), 2);
+    assert_eq!(config.plugins[0].name, "hello");
+    assert_eq!(config.plugins[0].command, common.join("bin/hello"));
+    assert_eq!(config.plugins[0].working_dir, Some(common.clone()));
+    assert!(config.plugins[0].autostart);
+    assert_eq!(config.routes.len(), 1);
+    assert_eq!(config.routes[0].source.as_deref(), Some("hello"));
+    assert_eq!(config.routes[0].topic.as_deref(), Some("hello.greeting"));
+    assert_eq!(config.routes[0].payload, Some(PayloadKind::Text));
+    assert_eq!(config.routes[0].to, vec!["print"]);
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn reports_compile_errors_in_included_files() {
+    let temp = test_temp_dir("include-diagnostic");
+    std::fs::create_dir_all(&temp).unwrap();
+
+    let main = temp.join("cubex.cx");
+    let predicates = temp.join("predicates.cx");
+
+    std::fs::write(
+        &predicates,
+        r#"
+let bad_source = source == missing
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &main,
+        r#"
+include "predicates.cx"
+
+strategy "bad-include" {
+  plugin print = process("print")
+  route bad-route = bad_source -> [print]
+}
+"#,
+    )
+    .unwrap();
+
+    let error = compile_file(&main).unwrap_err().to_string();
+
+    assert!(error.contains(&format!(
+        "strategy compile error at {}:2:28",
+        predicates.display()
+    )));
+    assert!(error.contains("let bad_source = source == missing"));
+    assert!(error.contains("unknown plugin or engine `missing`"));
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn reports_missing_includes_at_include_site() {
+    let temp = test_temp_dir("missing-include");
+    std::fs::create_dir_all(&temp).unwrap();
+
+    let main = temp.join("cubex.cx");
+    std::fs::write(
+        &main,
+        r#"
+include "missing.cx"
+
+strategy "bad-include" {}
+"#,
+    )
+    .unwrap();
+
+    let error = compile_file(&main).unwrap_err().to_string();
+
+    assert!(error.contains(&format!("strategy compile error at {}:2:9", main.display())));
+    assert!(error.contains("include \"missing.cx\""));
+    assert!(error.contains("failed to read include"));
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn reports_include_cycles_at_include_site() {
+    let temp = test_temp_dir("include-cycle");
+    std::fs::create_dir_all(&temp).unwrap();
+
+    let main = temp.join("cubex.cx");
+    let a = temp.join("a.cx");
+    let b = temp.join("b.cx");
+
+    std::fs::write(
+        &main,
+        r#"
+include "a.cx"
+
+strategy "cycle" {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &a,
+        r#"
+include "b.cx"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &b,
+        r#"
+include "a.cx"
+"#,
+    )
+    .unwrap();
+
+    let error = compile_file(&main).unwrap_err().to_string();
+
+    assert!(error.contains(&format!("strategy compile error at {}:2:9", b.display())));
+    assert!(error.contains("include \"a.cx\""));
+    assert!(error.contains("include cycle detected"));
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+fn test_temp_dir(label: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "cubex-strategy-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    path
+}

@@ -45,7 +45,7 @@
     from_topic(hello, "hello.greeting") && payload == text -> [print]
   ```
 
-- [ ] Add file-level `include` support.
+- [x] Add file-level `include` support.
 
   Large strategy sets will repeat plugin declarations, common predicates, and
   capability templates. A simple file-level include is enough for the first

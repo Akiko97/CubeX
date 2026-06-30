@@ -1,12 +1,13 @@
 use crate::ast::{
-    CapabilityDecl, CapabilityKind, EngineDecl, Expr, FieldPath, LetDecl, Literal, PluginDecl,
-    PluginKind, PredicateFnDecl, RouteDecl, RouteTarget, SourceSpan, Spanned, StoreDecl, Strategy,
+    CapabilityDecl, CapabilityKind, EngineDecl, Expr, FieldPath, IncludeDecl, LetDecl, Literal,
+    PluginDecl, PluginKind, PredicateFnDecl, RouteDecl, RouteTarget, SourceSpan, Spanned,
+    StoreDecl, Strategy, StrategyFile, StrategyFileBody, StrategyFragment,
 };
 use crate::error::{Result, StrategyError};
 use cubex_protocol::PayloadKind;
 use pest::Parser;
 use pest::error::InputLocation;
-use pest::iterators::Pair;
+use pest::iterators::{Pair, Pairs};
 use pest_derive::Parser;
 
 #[derive(Parser)]
@@ -18,6 +19,22 @@ pub fn parse_str(input: &str) -> Result<Strategy> {
 }
 
 pub(crate) fn parse_str_with_source(input: &str, source_name: Option<&str>) -> Result<Strategy> {
+    let file = parse_file_with_source(input, source_name)?;
+    match file.body {
+        StrategyFileBody::Strategy(strategy) => Ok(strategy),
+        StrategyFileBody::Fragment(fragment) => Err(StrategyError::parse_diagnostic(
+            input,
+            source_name,
+            fragment.span,
+            "missing strategy declaration",
+        )),
+    }
+}
+
+pub(crate) fn parse_file_with_source(
+    input: &str,
+    source_name: Option<&str>,
+) -> Result<StrategyFile> {
     let mut pairs = StrategyParser::parse(Rule::file, input).map_err(|err| {
         StrategyError::parse_diagnostic(
             input,
@@ -30,12 +47,7 @@ pub(crate) fn parse_str_with_source(input: &str, source_name: Option<&str>) -> R
         .next()
         .ok_or_else(|| ParserError::parse(SourceSpan::default(), "empty parser output"))
         .map_err(|err| err.into_strategy_error(input, source_name))?;
-    let strategy_pair = file
-        .into_inner()
-        .find(|pair| pair.as_rule() == Rule::strategy_decl)
-        .ok_or_else(|| ParserError::parse(SourceSpan::default(), "missing strategy declaration"))
-        .map_err(|err| err.into_strategy_error(input, source_name))?;
-    parse_strategy_decl(strategy_pair).map_err(|err| err.into_strategy_error(input, source_name))
+    parse_strategy_file(file).map_err(|err| err.into_strategy_error(input, source_name))
 }
 
 type ParseResult<T> = std::result::Result<T, ParserError>;
@@ -104,6 +116,69 @@ fn pest_error_span(input: &str, err: &pest::error::Error<Rule>) -> SourceSpan {
     }
 }
 
+fn parse_strategy_file(pair: Pair<'_, Rule>) -> ParseResult<StrategyFile> {
+    let span = pair_span(&pair);
+    let mut includes = Vec::new();
+    let mut body = None;
+
+    for item in pair.into_inner() {
+        match item.as_rule() {
+            Rule::include_decl => includes.push(parse_include_decl(item)?),
+            Rule::strategy_decl => {
+                if body.is_some() {
+                    return Err(ParserError::parse_pair(
+                        &item,
+                        "strategy body declared more than once",
+                    ));
+                }
+                body = Some(StrategyFileBody::Strategy(parse_strategy_decl(item)?));
+            }
+            Rule::fragment => {
+                if body.is_some() {
+                    return Err(ParserError::parse_pair(
+                        &item,
+                        "strategy body declared more than once",
+                    ));
+                }
+                body = Some(StrategyFileBody::Fragment(parse_fragment(item)?));
+            }
+            Rule::EOI => {}
+            _ => {
+                return Err(ParserError::parse_pair(
+                    &item,
+                    format!("unexpected file item `{}`", item.as_str()),
+                ));
+            }
+        }
+    }
+
+    let body = body.ok_or_else(|| ParserError::parse(span, "missing strategy declaration"))?;
+    Ok(StrategyFile {
+        includes,
+        body,
+        span,
+    })
+}
+
+fn parse_include_decl(pair: Pair<'_, Rule>) -> ParseResult<IncludeDecl> {
+    let span = pair_span(&pair);
+    let path = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| ParserError::parse(span, "include missing path"))?;
+    let path_span = pair_span(&path);
+    Ok(IncludeDecl {
+        path: parse_string(path)?,
+        path_span,
+        span,
+    })
+}
+
+fn parse_fragment(pair: Pair<'_, Rule>) -> ParseResult<StrategyFragment> {
+    let span = pair_span(&pair);
+    parse_items(pair.into_inner(), span)
+}
+
 fn parse_strategy_decl(pair: Pair<'_, Rule>) -> ParseResult<Strategy> {
     let span = pair_span(&pair);
     let mut inner = pair.into_inner();
@@ -115,42 +190,50 @@ fn parse_strategy_decl(pair: Pair<'_, Rule>) -> ParseResult<Strategy> {
     let block = inner
         .next()
         .ok_or_else(|| ParserError::parse(span, "missing strategy block"))?;
+    let items = parse_items(block.into_inner(), span)?;
 
-    let mut strategy = Strategy {
+    Ok(Strategy {
         name,
         span,
-        engine: None,
-        store: None,
-        plugins: Vec::new(),
-        lets: Vec::new(),
-        functions: Vec::new(),
-        routes: Vec::new(),
+        engine: items.engine,
+        store: items.store,
+        plugins: items.plugins,
+        lets: items.lets,
+        functions: items.functions,
+        routes: items.routes,
+    })
+}
+
+fn parse_items(items: Pairs<'_, Rule>, span: SourceSpan) -> ParseResult<StrategyFragment> {
+    let mut fragment = StrategyFragment {
+        span,
+        ..StrategyFragment::default()
     };
 
-    for item in block.into_inner() {
+    for item in items {
         match item.as_rule() {
             Rule::engine_decl => {
-                if strategy.engine.is_some() {
+                if fragment.engine.is_some() {
                     return Err(ParserError::compile_pair(
                         &item,
                         "engine block declared more than once",
                     ));
                 }
-                strategy.engine = Some(parse_engine_decl(item)?);
+                fragment.engine = Some(parse_engine_decl(item)?);
             }
             Rule::store_decl => {
-                if strategy.store.is_some() {
+                if fragment.store.is_some() {
                     return Err(ParserError::compile_pair(
                         &item,
                         "store block declared more than once",
                     ));
                 }
-                strategy.store = Some(parse_store_decl(item)?);
+                fragment.store = Some(parse_store_decl(item)?);
             }
-            Rule::plugin_decl => strategy.plugins.push(parse_plugin_decl(item)?),
-            Rule::let_decl => strategy.lets.push(parse_let_decl(item)?),
-            Rule::fn_decl => strategy.functions.push(parse_fn_decl(item)?),
-            Rule::route_decl => strategy.routes.push(parse_route_decl(item)?),
+            Rule::plugin_decl => fragment.plugins.push(parse_plugin_decl(item)?),
+            Rule::let_decl => fragment.lets.push(parse_let_decl(item)?),
+            Rule::fn_decl => fragment.functions.push(parse_fn_decl(item)?),
+            Rule::route_decl => fragment.routes.push(parse_route_decl(item)?),
             _ => {
                 return Err(ParserError::parse_pair(
                     &item,
@@ -160,7 +243,7 @@ fn parse_strategy_decl(pair: Pair<'_, Rule>) -> ParseResult<Strategy> {
         }
     }
 
-    Ok(strategy)
+    Ok(fragment)
 }
 
 fn parse_engine_decl(pair: Pair<'_, Rule>) -> ParseResult<EngineDecl> {

@@ -1,7 +1,10 @@
 WHITESPACE = _{ " " | "\t" | NEWLINE }
 COMMENT = _{ "#" ~ (!NEWLINE ~ ANY)* }
 
-file = { SOI ~ strategy_decl ~ EOI }
+file = { SOI ~ include_decl* ~ file_body ~ EOI }
+file_body = _{ strategy_decl | fragment }
+fragment = { item* }
+include_decl = { "include" ~ string }
 strategy_decl = { "strategy" ~ string ~ block }
 block = { "{" ~ item* ~ "}" }
 item = _{ engine_decl | store_decl | plugin_decl | let_decl | fn_decl | route_decl }

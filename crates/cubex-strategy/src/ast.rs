@@ -1,6 +1,37 @@
 use cubex_protocol::PayloadKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StrategyFile {
+    pub(crate) includes: Vec<IncludeDecl>,
+    pub(crate) body: StrategyFileBody,
+    pub(crate) span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StrategyFileBody {
+    Strategy(Strategy),
+    Fragment(StrategyFragment),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct StrategyFragment {
+    pub(crate) span: SourceSpan,
+    pub(crate) engine: Option<EngineDecl>,
+    pub(crate) store: Option<StoreDecl>,
+    pub(crate) plugins: Vec<PluginDecl>,
+    pub(crate) lets: Vec<LetDecl>,
+    pub(crate) functions: Vec<PredicateFnDecl>,
+    pub(crate) routes: Vec<RouteDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IncludeDecl {
+    pub(crate) path: String,
+    pub(crate) path_span: SourceSpan,
+    pub(crate) span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Strategy {
     pub name: String,
     pub span: SourceSpan,
@@ -21,6 +52,13 @@ pub struct SourceSpan {
 impl SourceSpan {
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
+    }
+
+    pub fn offset(self, offset: usize) -> Self {
+        Self {
+            start: self.start + offset,
+            end: self.end + offset,
+        }
     }
 }
 

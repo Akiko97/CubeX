@@ -1,0 +1,6 @@
+plugin hello = process("../../../target/debug/cubex-hello-plugin") {
+  args = ["CubeX"]
+  autostart = true
+}
+
+plugin print = process("../../../target/debug/cubex-print-plugin")

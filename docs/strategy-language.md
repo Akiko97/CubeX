@@ -63,6 +63,33 @@ strategy "display-name" {
 }
 ```
 
+Strategy files may include shared declarations before the `strategy` block:
+
+```cx
+include "../common/plugins.cx"
+include "../common/predicates.cx"
+
+strategy "hello-example" {
+  route greeting-to-print =
+    from_topic(hello, "hello.greeting", text) -> [print]
+}
+```
+
+Included files may be declaration fragments:
+
+```cx
+plugin print = process("../../target/debug/cubex-print-plugin")
+
+fn from_topic(src, t, kind) =
+  source == src && topic == t && payload == kind
+```
+
+Includes are expanded in order before the including file's declarations. Include
+paths resolve relative to the file that contains the `include` statement. Paths
+declared inside an included file, such as plugin commands, Wasm paths,
+`working_dir`, store paths, and file capabilities, resolve relative to that
+included file.
+
 Store configuration maps directly to `[store]`:
 
 ```cx
@@ -152,6 +179,7 @@ The strategy compiler performs checks before handing the config to CubeX:
 - conflicting predicates such as `payload == text && payload == record`;
 - duplicate or conflicting record field predicates;
 - empty target lists.
+- missing include files and include cycles.
 
 The generated `Config` is still validated by `cubex-core`, and `cubex check
 --strict` continues to verify runtime files.
@@ -177,5 +205,5 @@ cargo run -p cubex-cli -- check -c examples/strategy/hello.cx
 cargo run -p cubex-cli -- run --strict -c examples/strategy/hello.cx
 ```
 
-Paths inside `.cx` files resolve relative to the strategy file, matching TOML
-configuration behavior.
+Paths inside `.cx` files resolve relative to the file where they are declared,
+matching TOML configuration behavior for single-file strategies.
