@@ -36,8 +36,15 @@ enum Command {
     },
 }
 
-fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+fn main() {
+    if let Err(error) = run(Cli::parse()) {
+        eprintln!("{}", format_cli_error(&error));
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> anyhow::Result<()> {
+    match cli.command {
         Command::Run { config, strict } => {
             let config = load_config(&config)?;
             let engine = cubex_core::Engine::from_config(config.clone())?;
@@ -92,6 +99,19 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn format_cli_error(error: &anyhow::Error) -> String {
+    if let Some(error) = error.downcast_ref::<cubex_strategy::StrategyError>() {
+        return error.to_string();
+    }
+
+    let mut text = format!("error: {error}");
+    for cause in error.chain().skip(1) {
+        text.push_str("\n  caused by: ");
+        text.push_str(&cause.to_string());
+    }
+    text
 }
 
 fn load_config(path: &Path) -> anyhow::Result<cubex_core::Config> {

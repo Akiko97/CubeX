@@ -17,7 +17,7 @@
     unknown plugin or engine `missing`
   ```
 
-- [ ] Stabilize CLI error output for `cubex compile` and `cubex check`.
+- [x] Stabilize CLI error output for `cubex compile` and `cubex check`.
 
   Once diagnostics include source locations, the CLI should print them in a
   stable format so CI logs are useful and tests can assert exact failure modes.
