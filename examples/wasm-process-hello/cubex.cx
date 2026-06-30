@@ -1,0 +1,18 @@
+strategy "wasm-process-hello-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin hello = process("../../target/debug/cubex-hello-plugin") {
+    args = ["CubeX"]
+    autostart = true
+  }
+
+  plugin wasm-echo = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_echo_plugin.wasm")
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route process-greeting-to-wasm-echo-and-print = source == "hello" && topic == "hello.greeting" && payload == text -> [wasm-echo, print]
+
+  route wasm-echo-to-process-print = source == "wasm-echo" && topic == "echo.reply" && payload == text -> [print]
+}

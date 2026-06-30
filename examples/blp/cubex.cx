@@ -1,0 +1,39 @@
+strategy "blp-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin alice-read-runbook = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["alice-read-runbook.txt", "blp.request", "record-typed"]
+    autostart = true
+  }
+
+  plugin bob-read-finance = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["bob-read-finance.txt", "blp.request", "record-typed"]
+    autostart = true
+  }
+
+  plugin carol-write-public = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["carol-write-public.txt", "blp.request", "record-typed"]
+    autostart = true
+  }
+
+  plugin ingest-write-vault = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["ingest-write-vault.txt", "blp.request", "record-typed"]
+    autostart = true
+  }
+
+  plugin blp-policy = process("../../target/debug/cubex-blp-policy-plugin")
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route requests-to-blp-policy = topic == "blp.request" && payload == record -> [blp-policy]
+
+  route blp-allowed-to-print = source == "blp-policy" && topic == "blp.allowed" && payload == record -> [print]
+
+  route blp-denied-to-print = source == "blp-policy" && topic == "blp.denied" && payload == record -> [print]
+}

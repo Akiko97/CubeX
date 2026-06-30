@@ -1,0 +1,25 @@
+strategy "record-store-replay" {
+  engine {
+    max_messages = 32
+  }
+
+  store {
+    path = "events.bin"
+    replay_on_start = true
+  }
+
+  plugin record-source = process("../../target/debug/cubex-record-source-plugin") {
+    args = ["demo-record", "stored through CubeX"]
+  }
+
+  plugin record-store = process("../../target/debug/cubex-record-store-plugin") {
+    working_dir = "."
+    args = ["records.bin"]
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route records-to-store = source == "record-source" && topic == "record.put" && payload == record -> [record-store]
+
+  route store-acks-to-print = source == "record-store" && topic == "record.stored" && payload == text -> [print]
+}

@@ -2,6 +2,10 @@
 
 An instance is described by one TOML file.
 
+Experimental `.cx` strategy files can also be compiled to this same
+configuration model. See [Strategy Language](strategy-language.md) for the
+strongly functional policy front end and compiler.
+
 ```toml
 [engine]
 name = "hello-example"

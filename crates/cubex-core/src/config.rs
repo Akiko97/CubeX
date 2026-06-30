@@ -1,10 +1,10 @@
 use crate::{Error, Result};
 use cubex_protocol::PayloadKind;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -32,7 +32,7 @@ impl Config {
         Ok(config)
     }
 
-    pub(crate) fn resolve_relative_paths(&mut self, base_dir: &Path) {
+    pub fn resolve_relative_paths(&mut self, base_dir: &Path) {
         for plugin in &mut self.plugins {
             if !plugin.command.as_os_str().is_empty()
                 && !path_is_blank(&plugin.command)
@@ -82,7 +82,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EngineConfig {
     pub name: String,
@@ -98,14 +98,14 @@ impl Default for EngineConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StoreConfig {
     pub path: Option<PathBuf>,
     pub replay_on_start: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginConfig {
     pub name: String,
@@ -123,7 +123,7 @@ pub struct PluginConfig {
     pub capabilities: Vec<CapabilityConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum CapabilityConfig {
     FileRead { path: PathBuf },
@@ -134,7 +134,7 @@ pub enum CapabilityConfig {
     RecordStore { path: PathBuf },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteConfig {
     pub name: String,
@@ -149,7 +149,7 @@ pub struct RouteConfig {
     pub to: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum RouteValue {
     Bool(bool),

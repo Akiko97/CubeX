@@ -1,0 +1,26 @@
+strategy "crypto-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin hello = process("../../target/debug/cubex-hello-plugin") {
+    args = ["CubeX"]
+    autostart = true
+  }
+
+  plugin bytes = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["../bytes-flow/input.bin", "file.bytes", "bytes"]
+    autostart = true
+  }
+
+  plugin sha256 = process("../../target/debug/cubex-sha256-plugin")
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route greeting-to-sha256 = source == "hello" && topic == "hello.greeting" && payload == text -> [sha256]
+
+  route bytes-to-sha256 = source == "bytes" && topic == "file.bytes" && payload == bytes -> [sha256]
+
+  route digest-to-print = source == "sha256" && topic == "crypto.sha256" && payload == record -> [print]
+}

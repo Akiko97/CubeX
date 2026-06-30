@@ -1,0 +1,22 @@
+strategy "record-store-get" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin record-get = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["get.txt", "record.get", "record-key"]
+    autostart = true
+  }
+
+  plugin record-store = process("../../target/debug/cubex-record-store-plugin") {
+    working_dir = "."
+    args = ["records.bin"]
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route get-to-store = source == "record-get" && topic == "record.get" && payload == record -> [record-store]
+
+  route loaded-to-print = source == "record-store" && topic == "record.loaded" && payload == text -> [print]
+}

@@ -1,0 +1,18 @@
+strategy "hello-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin hello = process("../../target/debug/cubex-hello-plugin") {
+    args = ["CubeX"]
+    autostart = true
+  }
+
+  plugin echo = process("../../target/debug/cubex-echo-plugin")
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route greeting-to-echo-and-print = source == "hello" && topic == "hello.greeting" && payload == text -> [echo, print]
+
+  route echo-to-print = source == "echo" && topic == "echo.reply" && payload == text -> [print]
+}

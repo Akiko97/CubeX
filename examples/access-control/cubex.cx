@@ -1,0 +1,30 @@
+strategy "access-control-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin access-policy = process("../../target/debug/cubex-access-policy-plugin") {
+    args = ["alice=record.put"]
+    autostart = true
+  }
+
+  plugin record-source = process("../../target/debug/cubex-record-source-plugin") {
+    args = ["allowed-record", "policy payload", "alice"]
+    autostart = true
+  }
+
+  plugin denied-record-source = process("../../target/debug/cubex-record-source-plugin") {
+    args = ["denied-record", "policy payload", "bob"]
+    autostart = true
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route record-to-policy = source == "record-source" && topic == "record.put" && payload == record -> [access-policy]
+
+  route denied-record-to-policy = source == "denied-record-source" && topic == "record.put" && payload == record -> [access-policy]
+
+  route allowed-to-print = source == "access-policy" && topic == "access.allowed" && payload == record -> [print]
+
+  route denied-to-print = source == "access-policy" && topic == "access.denied" && payload == record -> [print]
+}

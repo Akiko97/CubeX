@@ -1,0 +1,57 @@
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+COMMENT = _{ "#" ~ (!NEWLINE ~ ANY)* }
+
+file = { SOI ~ strategy_decl ~ EOI }
+strategy_decl = { "strategy" ~ string ~ block }
+block = { "{" ~ item* ~ "}" }
+item = _{ engine_decl | store_decl | plugin_decl | let_decl | route_decl }
+
+engine_decl = { "engine" ~ "{" ~ engine_field* ~ "}" }
+engine_field = _{ engine_name_field | max_messages_field }
+engine_name_field = { "name" ~ "=" ~ string }
+max_messages_field = { "max_messages" ~ "=" ~ uint }
+
+store_decl = { "store" ~ "{" ~ store_field* ~ "}" }
+store_field = _{ store_path_field | replay_on_start_field }
+store_path_field = { "path" ~ "=" ~ string }
+replay_on_start_field = { "replay_on_start" ~ "=" ~ bool }
+
+plugin_decl = { "plugin" ~ ident ~ "=" ~ plugin_kind ~ plugin_body? }
+plugin_kind = _{ process_plugin | wasm_plugin }
+process_plugin = { "process" ~ "(" ~ string ~ ")" }
+wasm_plugin = { "wasm" ~ "(" ~ string ~ ")" }
+plugin_body = { "{" ~ plugin_field* ~ "}" }
+plugin_field = _{ args_field | autostart_field | working_dir_field | capability_decl }
+args_field = { "args" ~ "=" ~ string_list }
+autostart_field = { "autostart" ~ "=" ~ bool }
+working_dir_field = { "working_dir" ~ "=" ~ string }
+
+capability_decl = { "capability" ~ capability_kind }
+capability_kind = _{ file_read_capability | file_write_capability | tcp_connect_capability | tcp_listen_capability | record_store_capability | timer_capability }
+file_read_capability = { "file_read" ~ "(" ~ string ~ ")" }
+file_write_capability = { "file_write" ~ "(" ~ string ~ ")" }
+tcp_connect_capability = { "tcp_connect" ~ "(" ~ string ~ ")" }
+tcp_listen_capability = { "tcp_listen" ~ "(" ~ string ~ ")" }
+record_store_capability = { "record_store" ~ "(" ~ string ~ ")" }
+timer_capability = { "timer" }
+
+let_decl = { "let" ~ ident ~ "=" ~ expr }
+route_decl = { "route" ~ ident ~ "=" ~ expr ~ "->" ~ target_list }
+
+expr = { and_expr }
+and_expr = { primary ~ ("&&" ~ primary)* }
+primary = _{ comparison | ref_expr | "(" ~ expr ~ ")" }
+ref_expr = { ident }
+comparison = { field_path ~ "==" ~ value }
+field_path = { "source" | "topic" | "payload" | "record" ~ "." ~ ident }
+value = _{ string | bool | int | payload_kind | ident }
+payload_kind = { "text" | "bytes" | "record" | "control" }
+
+string_list = { "[" ~ (string ~ ("," ~ string)* ~ ","?)? ~ "]" }
+target_list = { "[" ~ (ident ~ ("," ~ ident)* ~ ","?)? ~ "]" }
+
+bool = { "true" | "false" }
+int = @{ "-"? ~ ASCII_DIGIT+ }
+uint = @{ ASCII_DIGIT+ }
+ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+string = @{ "\"" ~ ( "\\\"" | "\\\\" | "\\n" | "\\r" | "\\t" | !("\"" | "\\") ~ ANY )* ~ "\"" }

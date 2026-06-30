@@ -1,0 +1,22 @@
+strategy "register-bank-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin register-client = process("../../target/debug/cubex-register-client-plugin") {
+    args = ["7", "42"]
+    autostart = true
+  }
+
+  plugin register-bank = process("../../target/debug/cubex-register-bank-plugin")
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route register-write = source == "register-client" && topic == "register.write" && payload == record -> [register-bank]
+
+  route register-read = source == "register-client" && topic == "register.read" && payload == record -> [register-bank]
+
+  route write-ack-to-print = source == "register-bank" && topic == "register.written" && payload == record -> [print]
+
+  route read-value-to-print = source == "register-bank" && topic == "register.value" && payload == record -> [print]
+}

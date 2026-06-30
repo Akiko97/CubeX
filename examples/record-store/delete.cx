@@ -1,0 +1,22 @@
+strategy "record-store-delete" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin record-delete = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["delete.txt", "record.delete", "record-key"]
+    autostart = true
+  }
+
+  plugin record-store = process("../../target/debug/cubex-record-store-plugin") {
+    working_dir = "."
+    args = ["records.bin"]
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route delete-to-store = source == "record-delete" && topic == "record.delete" && payload == record -> [record-store]
+
+  route deleted-to-print = source == "record-store" && topic == "record.deleted" && payload == text -> [print]
+}

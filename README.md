@@ -78,6 +78,7 @@ Read more:
 
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
+- [Strategy language](docs/strategy-language.md)
 - [Plugin guide](docs/plugin-guide.md)
 
 ## Disclaimer

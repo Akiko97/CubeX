@@ -1,0 +1,27 @@
+strategy "wasm-record-store-example" {
+  engine {
+    max_messages = 32
+  }
+
+  store {
+    path = "events.bin"
+    replay_on_start = false
+  }
+
+  plugin wasm-record-source = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_record_source_plugin.wasm") {
+    args = ["demo-record", "stored through CubeX wasm"]
+    autostart = true
+  }
+
+  plugin wasm-record-store = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_record_store_plugin.wasm") {
+    working_dir = "."
+    args = ["records.bin"]
+    capability record_store("records.bin")
+  }
+
+  plugin wasm-print = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm")
+
+  route wasm-records-to-store = source == "wasm-record-source" && topic == "record.put" && payload == record -> [wasm-record-store]
+
+  route wasm-store-acks-to-print = source == "wasm-record-store" && topic == "record.stored" && payload == text -> [wasm-print]
+}

@@ -1,0 +1,19 @@
+strategy "network-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin tcp-echo = process("../../target/debug/cubex-tcp-echo-plugin") {
+    args = ["127.0.0.1:41011", "1"]
+    autostart = true
+  }
+
+  plugin tcp-client = process("../../target/debug/cubex-tcp-client-plugin") {
+    args = ["127.0.0.1:41011", "network ping", "2000"]
+    autostart = true
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route tcp-response-to-print = source == "tcp-client" && topic == "tcp.response" && payload == text -> [print]
+}

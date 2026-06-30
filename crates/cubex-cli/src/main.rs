@@ -23,6 +23,11 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    Compile {
+        source: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     Events {
         path: PathBuf,
     },
@@ -34,7 +39,7 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Run { config, strict } => {
-            let config = cubex_core::Config::from_file(config)?;
+            let config = load_config(&config)?;
             let engine = cubex_core::Engine::from_config(config.clone())?;
             if strict {
                 check_runtime_files(&config)?;
@@ -52,12 +57,22 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Command::Check { config, strict } => {
-            let config = cubex_core::Config::from_file(config)?;
+            let config = load_config(&config)?;
             let _ = cubex_core::Engine::from_config(config.clone())?;
             if strict {
                 check_runtime_files(&config)?;
             }
             println!("ok");
+        }
+        Command::Compile { source, output } => {
+            let config = cubex_strategy::compile_file(&source)?;
+            let _ = cubex_core::Engine::from_config(config.clone())?;
+            let text = toml::to_string_pretty(&config)?;
+            if let Some(output) = output {
+                std::fs::write(output, text)?;
+            } else {
+                print!("{text}");
+            }
         }
         Command::Events { path } => {
             require_existing_file(&path, "event log")?;
@@ -77,6 +92,20 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn load_config(path: &Path) -> anyhow::Result<cubex_core::Config> {
+    if is_strategy_file(path) {
+        Ok(cubex_strategy::compile_file(path)?)
+    } else {
+        Ok(cubex_core::Config::from_file(path)?)
+    }
+}
+
+fn is_strategy_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cx"))
 }
 
 fn format_event(index: usize, message: &cubex_protocol::Message) -> String {

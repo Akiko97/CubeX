@@ -1,0 +1,14 @@
+strategy "timer-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin timer = process("../../target/debug/cubex-timer-plugin") {
+    args = ["3", "0", "timer.tick"]
+    autostart = true
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route ticks-to-print = source == "timer" && topic == "timer.tick" && payload == record -> [print]
+}

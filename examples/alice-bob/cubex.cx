@@ -1,0 +1,30 @@
+strategy "alice-bob-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin alice = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["message.txt", "alice.message", "text"]
+    autostart = true
+  }
+
+  plugin transfer = process("../../target/debug/cubex-echo-plugin")
+
+  plugin wiretap-digest = process("../../target/debug/cubex-sha256-plugin")
+
+  plugin bob = process("../../target/debug/cubex-file-sink-plugin") {
+    working_dir = "."
+    args = ["received.txt"]
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route alice-to-transfer-and-wiretap = source == "alice" && topic == "alice.message" && payload == text -> [transfer, wiretap-digest]
+
+  route transfer-to-bob = source == "transfer" && topic == "echo.reply" && payload == text -> [bob]
+
+  route bob-write-to-print = source == "bob" && topic == "file.written" && payload == text -> [print]
+
+  route wiretap-digest-to-print = source == "wiretap-digest" && topic == "crypto.sha256" && payload == record -> [print]
+}

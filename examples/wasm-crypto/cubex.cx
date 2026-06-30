@@ -1,0 +1,18 @@
+strategy "wasm-crypto-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin wasm-hello = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_hello_plugin.wasm") {
+    args = ["CubeX"]
+    autostart = true
+  }
+
+  plugin wasm-sha256 = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_sha256_plugin.wasm")
+
+  plugin wasm-print = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm")
+
+  route wasm-greeting-to-sha256 = source == "wasm-hello" && topic == "hello.greeting" && payload == text -> [wasm-sha256]
+
+  route wasm-digest-to-print = source == "wasm-sha256" && topic == "crypto.sha256" && payload == record -> [wasm-print]
+}

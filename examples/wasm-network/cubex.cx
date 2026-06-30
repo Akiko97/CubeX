@@ -1,0 +1,21 @@
+strategy "wasm-network-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin wasm-tcp-echo = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_tcp_echo_plugin.wasm") {
+    args = ["127.0.0.1:41021", "1"]
+    autostart = true
+    capability tcp_listen("127.0.0.1:41021")
+  }
+
+  plugin wasm-tcp-client = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_tcp_client_plugin.wasm") {
+    args = ["127.0.0.1:41021", "wasm network ping", "2000"]
+    autostart = true
+    capability tcp_connect("127.0.0.1:41021")
+  }
+
+  plugin wasm-print = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm")
+
+  route wasm-tcp-response-to-print = source == "wasm-tcp-client" && topic == "tcp.response" && payload == text -> [wasm-print]
+}

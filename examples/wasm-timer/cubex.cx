@@ -1,0 +1,15 @@
+strategy "wasm-timer-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin wasm-timer = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_timer_plugin.wasm") {
+    args = ["3", "0", "timer.tick"]
+    autostart = true
+    capability timer
+  }
+
+  plugin wasm-print = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm")
+
+  route wasm-ticks-to-print = source == "wasm-timer" && topic == "timer.tick" && payload == record -> [wasm-print]
+}

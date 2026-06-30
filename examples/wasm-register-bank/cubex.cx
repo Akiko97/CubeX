@@ -1,0 +1,22 @@
+strategy "wasm-register-bank-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin wasm-register-client = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_register_client_plugin.wasm") {
+    args = ["7", "42"]
+    autostart = true
+  }
+
+  plugin wasm-register-bank = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_register_bank_plugin.wasm")
+
+  plugin wasm-print = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm")
+
+  route wasm-register-write = source == "wasm-register-client" && topic == "register.write" && payload == record -> [wasm-register-bank]
+
+  route wasm-register-read = source == "wasm-register-client" && topic == "register.read" && payload == record -> [wasm-register-bank]
+
+  route wasm-write-ack-to-print = source == "wasm-register-bank" && topic == "register.written" && payload == record -> [wasm-print]
+
+  route wasm-read-value-to-print = source == "wasm-register-bank" && topic == "register.value" && payload == record -> [wasm-print]
+}

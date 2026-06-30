@@ -1,0 +1,15 @@
+strategy "record-route-example" {
+  engine {
+    max_messages = 16
+  }
+
+  plugin record-file = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["input.txt", "record.put", "record-typed"]
+    autostart = true
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route alice-records-to-print = source == "record-file" && topic == "record.put" && payload == record && record.user == "alice" && record.priority == 7 && record.active == true -> [print]
+}

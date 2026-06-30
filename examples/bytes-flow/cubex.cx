@@ -1,0 +1,26 @@
+strategy "bytes-flow-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin file-source = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["input.bin", "file.bytes", "bytes"]
+    autostart = true
+  }
+
+  plugin file-sink = process("../../target/debug/cubex-file-sink-plugin") {
+    working_dir = "."
+    args = ["output.bin"]
+  }
+
+  plugin echo = process("../../target/debug/cubex-echo-plugin")
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route bytes-to-echo = source == "file-source" && topic == "file.bytes" && payload == bytes -> [echo]
+
+  route echo-to-sink = source == "echo" && topic == "echo.reply" && payload == bytes -> [file-sink]
+
+  route sink-ack-to-print = source == "file-sink" && topic == "file.written" && payload == text -> [print]
+}

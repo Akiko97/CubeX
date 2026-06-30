@@ -1,0 +1,30 @@
+strategy "wasm-access-control-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin wasm-access-policy = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_access_policy_plugin.wasm") {
+    args = ["alice=record.put"]
+    autostart = true
+  }
+
+  plugin wasm-record-source = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_record_source_plugin.wasm") {
+    args = ["allowed-record", "policy payload", "alice"]
+    autostart = true
+  }
+
+  plugin wasm-denied-record-source = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_record_source_plugin.wasm") {
+    args = ["denied-record", "policy payload", "bob"]
+    autostart = true
+  }
+
+  plugin wasm-print = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm")
+
+  route wasm-record-to-policy = source == "wasm-record-source" && topic == "record.put" && payload == record -> [wasm-access-policy]
+
+  route wasm-denied-record-to-policy = source == "wasm-denied-record-source" && topic == "record.put" && payload == record -> [wasm-access-policy]
+
+  route wasm-allowed-to-print = source == "wasm-access-policy" && topic == "access.allowed" && payload == record -> [wasm-print]
+
+  route wasm-denied-to-print = source == "wasm-access-policy" && topic == "access.denied" && payload == record -> [wasm-print]
+}

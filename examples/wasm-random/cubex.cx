@@ -1,0 +1,14 @@
+strategy "wasm-random-example" {
+  engine {
+    max_messages = 16
+  }
+
+  plugin wasm-random = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_random_plugin.wasm") {
+    args = ["16", "random.bytes"]
+    autostart = true
+  }
+
+  plugin wasm-print = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm")
+
+  route wasm-random-to-print = source == "wasm-random" && topic == "random.bytes" && payload == text -> [wasm-print]
+}

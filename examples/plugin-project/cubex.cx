@@ -1,0 +1,14 @@
+strategy "plugin-project-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin example = process("../../target/debug/cubex-example-plugin") {
+    args = ["hello from a real plugin project"]
+    autostart = true
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route example-to-print = source == "example" && topic == "example.ready" && payload == text -> [print]
+}

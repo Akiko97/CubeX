@@ -1,0 +1,12 @@
+[package]
+name = "cubex-strategy"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+cubex-core = { path = "../cubex-core" }
+cubex-protocol = { path = "../cubex-protocol" }
+pest.workspace = true
+pest_derive.workspace = true
+thiserror.workspace = true

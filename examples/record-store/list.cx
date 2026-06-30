@@ -1,0 +1,22 @@
+strategy "record-store-list" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin record-list = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["list.txt", "record.list", "record-key"]
+    autostart = true
+  }
+
+  plugin record-store = process("../../target/debug/cubex-record-store-plugin") {
+    working_dir = "."
+    args = ["records.bin"]
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route list-to-store = source == "record-list" && topic == "record.list" && payload == record -> [record-store]
+
+  route listed-to-print = source == "record-store" && topic == "record.listed" && payload == text -> [print]
+}

@@ -1,0 +1,22 @@
+strategy "file-flow-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin file-source = process("../../target/debug/cubex-file-source-plugin") {
+    working_dir = "."
+    args = ["input.txt", "file.read", "text"]
+    autostart = true
+  }
+
+  plugin file-sink = process("../../target/debug/cubex-file-sink-plugin") {
+    working_dir = "."
+    args = ["output.txt"]
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  route source-to-sink-and-print = source == "file-source" && topic == "file.read" && payload == text -> [file-sink, print]
+
+  route sink-ack-to-print = source == "file-sink" && topic == "file.written" && payload == text -> [print]
+}

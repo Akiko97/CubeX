@@ -1,0 +1,28 @@
+strategy "wasm-bytes-flow-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin wasm-file-source = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_file_source_plugin.wasm") {
+    working_dir = "."
+    args = ["input.bin", "file.bytes", "bytes"]
+    autostart = true
+    capability file_read("input.bin")
+  }
+
+  plugin wasm-echo = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_echo_plugin.wasm")
+
+  plugin wasm-file-sink = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_file_sink_plugin.wasm") {
+    working_dir = "."
+    args = ["output.bin"]
+    capability file_write("output.bin")
+  }
+
+  plugin wasm-print = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm")
+
+  route wasm-bytes-to-echo = source == "wasm-file-source" && topic == "file.bytes" && payload == bytes -> [wasm-echo]
+
+  route wasm-echo-to-sink = source == "wasm-echo" && topic == "echo.reply" && payload == bytes -> [wasm-file-sink]
+
+  route wasm-sink-ack-to-print = source == "wasm-file-sink" && topic == "file.written" && payload == text -> [wasm-print]
+}

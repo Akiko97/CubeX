@@ -1,0 +1,24 @@
+strategy "wasm-file-flow-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin wasm-file-source = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_file_source_plugin.wasm") {
+    working_dir = "."
+    args = ["input.txt", "file.read", "text"]
+    autostart = true
+    capability file_read("input.txt")
+  }
+
+  plugin wasm-file-sink = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_file_sink_plugin.wasm") {
+    working_dir = "."
+    args = ["output.txt"]
+    capability file_write("output.txt")
+  }
+
+  plugin wasm-print = wasm("../../target/wasm32-unknown-unknown/debug/cubex_wasm_print_plugin.wasm")
+
+  route wasm-source-to-sink-and-print = source == "wasm-file-source" && topic == "file.read" && payload == text -> [wasm-file-sink, wasm-print]
+
+  route wasm-sink-ack-to-print = source == "wasm-file-sink" && topic == "file.written" && payload == text -> [wasm-print]
+}

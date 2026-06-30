@@ -25,6 +25,85 @@ run_and_expect() {
   grep -Fq "$expected" <<<"$output"
 }
 
+check_toml_configs() {
+  local config
+  for config in examples/*/*.toml; do
+    [[ "$(basename "$config")" == "Cargo.toml" ]] && continue
+    cargo run -q -p cubex-cli -- check -c "$config" >/dev/null
+    cargo run -q -p cubex-cli -- check --strict -c "$config" >/dev/null
+  done
+}
+
+check_strategy_configs() {
+  local strategy
+  for strategy in examples/*/*.cx; do
+    cargo run -q -p cubex-cli -- check -c "$strategy" >/dev/null
+    cargo run -q -p cubex-cli -- check --strict -c "$strategy" >/dev/null
+    cargo run -q -p cubex-cli -- compile "$strategy" >/dev/null
+  done
+}
+
+run_record_store_suite() {
+  local ext="$1"
+
+  run_and_expect "examples/record-store/cubex${ext}" "print: demo-record"
+  test -s examples/record-store/events.bin
+  cargo run -q -p cubex-cli -- events examples/record-store/events.bin | grep -Fq $'record-source\trecord.put'
+  test -s examples/record-store/records.bin
+  cargo run -q -p cubex-cli -- records examples/record-store/records.bin | grep -Fq $'demo-record\t'
+  run_and_expect "examples/record-store/get${ext}" "print: record demo-record found from record-source"
+  run_and_expect "examples/record-store/list${ext}" "print: records: demo-record"
+  run_and_expect "examples/record-store/delete${ext}" "print: record demo-record deleted"
+  run_and_expect "examples/record-store/replay${ext}" "replayed=2"
+  cargo run -q -p cubex-cli -- records examples/record-store/records.bin | grep -Fq $'demo-record\t'
+}
+
+run_example_suite() {
+  local ext="$1"
+
+  run_and_expect "examples/hello/cubex${ext}" "print: Hello, CubeX!"
+  if [[ "$ext" == ".cx" ]]; then
+    run_and_expect examples/strategy/hello.cx "print: Hello, CubeX!"
+  fi
+  run_and_expect "examples/access-control/cubex${ext}" '"decision": String("allowed")'
+  run_and_expect "examples/access-control/cubex${ext}" '"decision": String("denied")'
+  run_and_expect "examples/blp/cubex${ext}" '"reason": String("read-allowed")'
+  run_and_expect "examples/blp/cubex${ext}" '"reason": String("read-up")'
+  run_and_expect "examples/blp/cubex${ext}" '"reason": String("write-down")'
+  run_and_expect "examples/blp/cubex${ext}" '"reason": String("write-allowed")'
+  run_and_expect "examples/record-route/cubex${ext}" 'print: Record({"active": Bool(true), "message": String("from record file"), "priority": I64(7), "user": String("alice")})'
+  run_and_expect "examples/register-bank/cubex${ext}" 'print: Record({"address": U64(7), "value": U64(42)})'
+  run_and_expect "examples/timer/cubex${ext}" 'print: Record({"count": U64(3), "index": U64(2)})'
+  run_and_expect "examples/crypto/cubex${ext}" '9be26ffe0395269a8e85bd7a3278ef853d86138eb11354308dfdfb2a63b8d85a'
+  run_and_expect "examples/crypto/cubex${ext}" '7f4617f80e9020429b94e1ec86c8b0631d36f1ff76efa95920430f793477fd4a'
+  run_and_expect "examples/network/cubex${ext}" "print: network ping"
+  run_and_expect "examples/plugin-project/cubex${ext}" "print: hello from a real plugin project"
+  run_and_expect "examples/alice-bob/cubex${ext}" "print: received.txt"
+  run_and_expect "examples/alice-bob/cubex${ext}" "cb906c4ac6482bf714776a5373a198b06adc14fc30eaa83e3990034d18029c7d"
+  cmp -s examples/alice-bob/message.txt examples/alice-bob/received.txt
+  run_and_expect "examples/wasm-hello/cubex${ext}" "wasm-print: Hello, CubeX!"
+  run_and_expect "examples/wasm-process-hello/cubex${ext}" "print: Hello, CubeX!"
+  run_and_expect "examples/wasm-crypto/cubex${ext}" '9be26ffe0395269a8e85bd7a3278ef853d86138eb11354308dfdfb2a63b8d85a'
+  run_and_expect "examples/wasm-access-control/cubex${ext}" '"decision": String("allowed")'
+  run_and_expect "examples/wasm-access-control/cubex${ext}" '"decision": String("denied")'
+  run_and_expect "examples/wasm-register-bank/cubex${ext}" 'wasm-print: Record({"address": U64(7), "value": U64(42)})'
+  run_and_expect "examples/wasm-timer/cubex${ext}" 'wasm-print: Record({"count": U64(3), "index": U64(2)})'
+  run_and_expect "examples/wasm-random/cubex${ext}" "wasm-print: random bytes: "
+  run_and_expect "examples/wasm-network/cubex${ext}" "wasm-print: wasm network ping"
+  run_and_expect "examples/wasm-record-store/cubex${ext}" "wasm-print: demo-record"
+
+  run_and_expect "examples/file-flow/cubex${ext}" "print: output.txt"
+  cmp -s examples/file-flow/input.txt examples/file-flow/output.txt
+  run_and_expect "examples/bytes-flow/cubex${ext}" "print: output.bin"
+  cmp -s examples/bytes-flow/input.bin examples/bytes-flow/output.bin
+  run_and_expect "examples/wasm-file-flow/cubex${ext}" "wasm-print: output.txt"
+  cmp -s examples/wasm-file-flow/input.txt examples/wasm-file-flow/output.txt
+  run_and_expect "examples/wasm-bytes-flow/cubex${ext}" "wasm-print: output.bin"
+  cmp -s examples/wasm-bytes-flow/input.bin examples/wasm-bytes-flow/output.bin
+
+  run_record_store_suite "$ext"
+}
+
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -46,58 +125,10 @@ cargo build --target wasm32-unknown-unknown \
   -p cubex-wasm-tcp-echo-plugin \
   -p cubex-wasm-timer-plugin
 
-for config in examples/*/*.toml; do
-  [[ "$(basename "$config")" == "Cargo.toml" ]] && continue
-  cargo run -q -p cubex-cli -- check -c "$config" >/dev/null
-  cargo run -q -p cubex-cli -- check --strict -c "$config" >/dev/null
-done
-
-run_and_expect examples/hello/cubex.toml "print: Hello, CubeX!"
-run_and_expect examples/access-control/cubex.toml '"decision": String("allowed")'
-run_and_expect examples/access-control/cubex.toml '"decision": String("denied")'
-run_and_expect examples/blp/cubex.toml '"reason": String("read-allowed")'
-run_and_expect examples/blp/cubex.toml '"reason": String("read-up")'
-run_and_expect examples/blp/cubex.toml '"reason": String("write-down")'
-run_and_expect examples/blp/cubex.toml '"reason": String("write-allowed")'
-run_and_expect examples/record-route/cubex.toml 'print: Record({"active": Bool(true), "message": String("from record file"), "priority": I64(7), "user": String("alice")})'
-run_and_expect examples/register-bank/cubex.toml 'print: Record({"address": U64(7), "value": U64(42)})'
-run_and_expect examples/timer/cubex.toml 'print: Record({"count": U64(3), "index": U64(2)})'
-run_and_expect examples/crypto/cubex.toml '9be26ffe0395269a8e85bd7a3278ef853d86138eb11354308dfdfb2a63b8d85a'
-run_and_expect examples/crypto/cubex.toml '7f4617f80e9020429b94e1ec86c8b0631d36f1ff76efa95920430f793477fd4a'
-run_and_expect examples/network/cubex.toml "print: network ping"
-run_and_expect examples/plugin-project/cubex.toml "print: hello from a real plugin project"
-run_and_expect examples/alice-bob/cubex.toml "print: received.txt"
-run_and_expect examples/alice-bob/cubex.toml "cb906c4ac6482bf714776a5373a198b06adc14fc30eaa83e3990034d18029c7d"
-cmp -s examples/alice-bob/message.txt examples/alice-bob/received.txt
-run_and_expect examples/wasm-hello/cubex.toml "wasm-print: Hello, CubeX!"
-run_and_expect examples/wasm-process-hello/cubex.toml "print: Hello, CubeX!"
-run_and_expect examples/wasm-crypto/cubex.toml '9be26ffe0395269a8e85bd7a3278ef853d86138eb11354308dfdfb2a63b8d85a'
-run_and_expect examples/wasm-access-control/cubex.toml '"decision": String("allowed")'
-run_and_expect examples/wasm-access-control/cubex.toml '"decision": String("denied")'
-run_and_expect examples/wasm-register-bank/cubex.toml 'wasm-print: Record({"address": U64(7), "value": U64(42)})'
-run_and_expect examples/wasm-timer/cubex.toml 'wasm-print: Record({"count": U64(3), "index": U64(2)})'
-run_and_expect examples/wasm-random/cubex.toml "wasm-print: random bytes: "
-run_and_expect examples/wasm-network/cubex.toml "wasm-print: wasm network ping"
-run_and_expect examples/wasm-record-store/cubex.toml "wasm-print: demo-record"
-
-run_and_expect examples/file-flow/cubex.toml "print: output.txt"
-cmp -s examples/file-flow/input.txt examples/file-flow/output.txt
-run_and_expect examples/bytes-flow/cubex.toml "print: output.bin"
-cmp -s examples/bytes-flow/input.bin examples/bytes-flow/output.bin
-run_and_expect examples/wasm-file-flow/cubex.toml "wasm-print: output.txt"
-cmp -s examples/wasm-file-flow/input.txt examples/wasm-file-flow/output.txt
-run_and_expect examples/wasm-bytes-flow/cubex.toml "wasm-print: output.bin"
-cmp -s examples/wasm-bytes-flow/input.bin examples/wasm-bytes-flow/output.bin
-
-run_and_expect examples/record-store/cubex.toml "print: demo-record"
-test -s examples/record-store/events.bin
-cargo run -q -p cubex-cli -- events examples/record-store/events.bin | grep -Fq $'record-source\trecord.put'
-test -s examples/record-store/records.bin
-cargo run -q -p cubex-cli -- records examples/record-store/records.bin | grep -Fq $'demo-record\t'
-run_and_expect examples/record-store/get.toml "print: record demo-record found from record-source"
-run_and_expect examples/record-store/list.toml "print: records: demo-record"
-run_and_expect examples/record-store/delete.toml "print: record demo-record deleted"
-run_and_expect examples/record-store/replay.toml "replayed=2"
-cargo run -q -p cubex-cli -- records examples/record-store/records.bin | grep -Fq $'demo-record\t'
+check_toml_configs
+check_strategy_configs
+run_example_suite ".toml"
+cleanup
+run_example_suite ".cx"
 
 echo "smoke ok"

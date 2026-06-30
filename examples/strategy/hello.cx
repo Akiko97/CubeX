@@ -1,0 +1,17 @@
+strategy "strategy-hello-example" {
+  engine {
+    max_messages = 32
+  }
+
+  plugin hello = process("../../target/debug/cubex-hello-plugin") {
+    args = ["CubeX"]
+    autostart = true
+  }
+
+  plugin print = process("../../target/debug/cubex-print-plugin")
+
+  let greetings =
+    source == hello && topic == "hello.greeting" && payload == text
+
+  route greeting-to-print = greetings -> [print]
+}
