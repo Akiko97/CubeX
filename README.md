@@ -67,6 +67,13 @@ cargo run -p cubex-cli -- run --strict -c examples/record-route/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/register-bank/cubex.toml
 ```
 
+Run BLP and Alice/Bob examples:
+
+```sh
+cargo run -p cubex-cli -- run --strict -c examples/blp/cubex.toml
+cargo run -p cubex-cli -- run --strict -c examples/alice-bob/cubex.toml
+```
+
 Read more:
 
 - [Architecture](docs/architecture.md)

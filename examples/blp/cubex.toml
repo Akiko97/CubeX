@@ -1,0 +1,59 @@
+[engine]
+name = "blp-example"
+max_messages = 32
+
+[[plugins]]
+name = "alice-read-runbook"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["alice-read-runbook.txt", "blp.request", "record-typed"]
+autostart = true
+
+[[plugins]]
+name = "bob-read-finance"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["bob-read-finance.txt", "blp.request", "record-typed"]
+autostart = true
+
+[[plugins]]
+name = "carol-write-public"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["carol-write-public.txt", "blp.request", "record-typed"]
+autostart = true
+
+[[plugins]]
+name = "ingest-write-vault"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["ingest-write-vault.txt", "blp.request", "record-typed"]
+autostart = true
+
+[[plugins]]
+name = "blp-policy"
+command = "../../target/debug/cubex-blp-policy-plugin"
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "requests-to-blp-policy"
+topic = "blp.request"
+payload = "record"
+to = ["blp-policy"]
+
+[[routes]]
+name = "blp-allowed-to-print"
+source = "blp-policy"
+topic = "blp.allowed"
+payload = "record"
+to = ["print"]
+
+[[routes]]
+name = "blp-denied-to-print"
+source = "blp-policy"
+topic = "blp.denied"
+payload = "record"
+to = ["print"]

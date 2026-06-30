@@ -1,0 +1,7 @@
+subject=bob
+action=read
+subject_level=1
+subject_compartments=ops
+object=finance-plan
+object_level=3
+object_compartments=finance

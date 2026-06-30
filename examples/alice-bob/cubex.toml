@@ -1,0 +1,56 @@
+[engine]
+name = "alice-bob-example"
+max_messages = 32
+
+[[plugins]]
+name = "alice"
+command = "../../target/debug/cubex-file-source-plugin"
+working_dir = "."
+args = ["message.txt", "alice.message", "text"]
+autostart = true
+
+[[plugins]]
+name = "transfer"
+command = "../../target/debug/cubex-echo-plugin"
+
+[[plugins]]
+name = "wiretap-digest"
+command = "../../target/debug/cubex-sha256-plugin"
+
+[[plugins]]
+name = "bob"
+command = "../../target/debug/cubex-file-sink-plugin"
+working_dir = "."
+args = ["received.txt"]
+
+[[plugins]]
+name = "print"
+command = "../../target/debug/cubex-print-plugin"
+
+[[routes]]
+name = "alice-to-transfer-and-wiretap"
+source = "alice"
+topic = "alice.message"
+payload = "text"
+to = ["transfer", "wiretap-digest"]
+
+[[routes]]
+name = "transfer-to-bob"
+source = "transfer"
+topic = "echo.reply"
+payload = "text"
+to = ["bob"]
+
+[[routes]]
+name = "bob-write-to-print"
+source = "bob"
+topic = "file.written"
+payload = "text"
+to = ["print"]
+
+[[routes]]
+name = "wiretap-digest-to-print"
+source = "wiretap-digest"
+topic = "crypto.sha256"
+payload = "record"
+to = ["print"]

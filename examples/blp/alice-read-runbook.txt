@@ -1,0 +1,7 @@
+subject=alice
+action=read
+subject_level=3
+subject_compartments=ops,finance
+object=operations-runbook
+object_level=2
+object_compartments=ops

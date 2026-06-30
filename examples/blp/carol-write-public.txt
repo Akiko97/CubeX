@@ -1,0 +1,7 @@
+subject=carol
+action=write
+subject_level=3
+subject_compartments=ops
+object=public-summary
+object_level=1
+object_compartments=ops

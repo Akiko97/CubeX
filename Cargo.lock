@@ -411,6 +411,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cubex-blp-policy-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cubex-plugin-sdk",
+]
+
+[[package]]
 name = "cubex-cli"
 version = "0.1.0"
 dependencies = [

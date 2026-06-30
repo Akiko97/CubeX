@@ -11,6 +11,7 @@ plugins using `cubex-wasm-plugin-sdk`.
 - `cubex-record-source-plugin`: emits a structured record; args are optional key, message, and user.
 - `cubex-record-store-plugin`: stores, loads, lists, and deletes structured records in a binary file; get/list/delete accept text or record payloads; arg 0 is the optional store path.
 - `cubex-access-policy-plugin`: allows or denies records by user/topic rules.
+- `cubex-blp-policy-plugin`: applies Bell-LaPadula read/write checks to labeled record payloads.
 - `cubex-register-client-plugin`: emits a register write followed by a read; args are optional address and value.
 - `cubex-register-bank-plugin`: keeps an in-memory 16-bit register map.
 - `cubex-sha256-plugin`: hashes text or bytes with SHA-256.
@@ -75,6 +76,8 @@ cargo run -p cubex-cli -- run --strict -c examples/timer/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/network/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/crypto/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/access-control/cubex.toml
+cargo run -p cubex-cli -- run --strict -c examples/blp/cubex.toml
+cargo run -p cubex-cli -- run --strict -c examples/alice-bob/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/register-bank/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-hello/cubex.toml
 cargo run -p cubex-cli -- run --strict -c examples/wasm-crypto/cubex.toml

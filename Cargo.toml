@@ -8,6 +8,7 @@ members = [
     "crates/cubex-wasm-plugin-sdk",
     "examples/plugin-project",
     "plugins/access-policy-plugin",
+    "plugins/blp-policy-plugin",
     "plugins/echo-plugin",
     "plugins/file-sink-plugin",
     "plugins/file-source-plugin",

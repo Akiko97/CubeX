@@ -4,7 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 cleanup() {
-  rm -f examples/file-flow/output.txt \
+  rm -f examples/alice-bob/received.txt \
+    examples/file-flow/output.txt \
     examples/bytes-flow/output.bin \
     examples/record-store/events.bin \
     examples/record-store/records.bin \
@@ -54,6 +55,10 @@ done
 run_and_expect examples/hello/cubex.toml "print: Hello, CubeX!"
 run_and_expect examples/access-control/cubex.toml '"decision": String("allowed")'
 run_and_expect examples/access-control/cubex.toml '"decision": String("denied")'
+run_and_expect examples/blp/cubex.toml '"reason": String("read-allowed")'
+run_and_expect examples/blp/cubex.toml '"reason": String("read-up")'
+run_and_expect examples/blp/cubex.toml '"reason": String("write-down")'
+run_and_expect examples/blp/cubex.toml '"reason": String("write-allowed")'
 run_and_expect examples/record-route/cubex.toml 'print: Record({"active": Bool(true), "message": String("from record file"), "priority": I64(7), "user": String("alice")})'
 run_and_expect examples/register-bank/cubex.toml 'print: Record({"address": U64(7), "value": U64(42)})'
 run_and_expect examples/timer/cubex.toml 'print: Record({"count": U64(3), "index": U64(2)})'
@@ -61,6 +66,9 @@ run_and_expect examples/crypto/cubex.toml '9be26ffe0395269a8e85bd7a3278ef853d861
 run_and_expect examples/crypto/cubex.toml '7f4617f80e9020429b94e1ec86c8b0631d36f1ff76efa95920430f793477fd4a'
 run_and_expect examples/network/cubex.toml "print: network ping"
 run_and_expect examples/plugin-project/cubex.toml "print: hello from a real plugin project"
+run_and_expect examples/alice-bob/cubex.toml "print: received.txt"
+run_and_expect examples/alice-bob/cubex.toml "cb906c4ac6482bf714776a5373a198b06adc14fc30eaa83e3990034d18029c7d"
+cmp -s examples/alice-bob/message.txt examples/alice-bob/received.txt
 run_and_expect examples/wasm-hello/cubex.toml "wasm-print: Hello, CubeX!"
 run_and_expect examples/wasm-process-hello/cubex.toml "print: Hello, CubeX!"
 run_and_expect examples/wasm-crypto/cubex.toml '9be26ffe0395269a8e85bd7a3278ef853d86138eb11354308dfdfb2a63b8d85a'

@@ -1,0 +1,7 @@
+subject=ingest
+action=write
+subject_level=1
+subject_compartments=ops
+object=audit-vault
+object_level=3
+object_compartments=ops,archive
