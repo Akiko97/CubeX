@@ -1,6 +1,6 @@
 use crate::ast::{
     CapabilityDecl, CapabilityKind, EngineDecl, Expr, FieldPath, LetDecl, Literal, PluginDecl,
-    PluginKind, RouteDecl, RouteTarget, SourceSpan, Spanned, StoreDecl, Strategy,
+    PluginKind, PredicateFnDecl, RouteDecl, RouteTarget, SourceSpan, Spanned, StoreDecl, Strategy,
 };
 use crate::error::{Result, StrategyError};
 use cubex_protocol::PayloadKind;
@@ -123,6 +123,7 @@ fn parse_strategy_decl(pair: Pair<'_, Rule>) -> ParseResult<Strategy> {
         store: None,
         plugins: Vec::new(),
         lets: Vec::new(),
+        functions: Vec::new(),
         routes: Vec::new(),
     };
 
@@ -148,6 +149,7 @@ fn parse_strategy_decl(pair: Pair<'_, Rule>) -> ParseResult<Strategy> {
             }
             Rule::plugin_decl => strategy.plugins.push(parse_plugin_decl(item)?),
             Rule::let_decl => strategy.lets.push(parse_let_decl(item)?),
+            Rule::fn_decl => strategy.functions.push(parse_fn_decl(item)?),
             Rule::route_decl => strategy.routes.push(parse_route_decl(item)?),
             _ => {
                 return Err(ParserError::parse_pair(
@@ -420,6 +422,58 @@ fn parse_let_decl(pair: Pair<'_, Rule>) -> ParseResult<LetDecl> {
     })
 }
 
+fn parse_fn_decl(pair: Pair<'_, Rule>) -> ParseResult<PredicateFnDecl> {
+    let span = pair_span(&pair);
+    let mut inner = pair.into_inner();
+    let name_pair = inner
+        .next()
+        .ok_or_else(|| ParserError::parse(span, "missing predicate function name"))?;
+    let name_span = pair_span(&name_pair);
+    let name = name_pair.as_str().to_string();
+
+    let next = inner.next().ok_or_else(|| {
+        ParserError::parse(
+            span,
+            format!("predicate function `{name}` missing expression"),
+        )
+    })?;
+    let (params, expr_pair) = match next.as_rule() {
+        Rule::param_list => {
+            let params = parse_param_list(next)?;
+            let expr_pair = inner.next().ok_or_else(|| {
+                ParserError::parse(
+                    span,
+                    format!("predicate function `{name}` missing expression"),
+                )
+            })?;
+            (params, expr_pair)
+        }
+        Rule::expr => (Vec::new(), next),
+        _ => {
+            return Err(ParserError::parse_pair(
+                &next,
+                format!("unexpected predicate function item `{}`", next.as_str()),
+            ));
+        }
+    };
+    let expr = parse_expr(expr_pair)?;
+
+    Ok(PredicateFnDecl {
+        name,
+        name_span,
+        span,
+        params,
+        expr,
+    })
+}
+
+fn parse_param_list(pair: Pair<'_, Rule>) -> ParseResult<Vec<Spanned<String>>> {
+    Ok(pair
+        .into_inner()
+        .map(|param| Spanned::new(param.as_str().to_string(), pair_span(&param)))
+        .collect())
+}
+
 fn parse_route_decl(pair: Pair<'_, Rule>) -> ParseResult<RouteDecl> {
     let span = pair_span(&pair);
     let mut inner = pair.into_inner();
@@ -478,11 +532,42 @@ fn parse_expr(pair: Pair<'_, Rule>) -> ParseResult<Expr> {
                 .to_string();
             Ok(Expr::Ref { name, span })
         }
+        Rule::call_expr => parse_call_expr(pair),
         _ => Err(ParserError::parse(
             span,
             format!("unexpected expression `{}`", pair.as_str()),
         )),
     }
+}
+
+fn parse_call_expr(pair: Pair<'_, Rule>) -> ParseResult<Expr> {
+    let span = pair_span(&pair);
+    let mut inner = pair.into_inner();
+    let name_pair = inner
+        .next()
+        .ok_or_else(|| ParserError::parse(span, "missing predicate function name"))?;
+    let name_span = pair_span(&name_pair);
+    let name = name_pair.as_str().to_string();
+    let args = match inner.next() {
+        Some(args) if args.as_rule() == Rule::arg_list => parse_arg_list(args)?,
+        Some(unexpected) => {
+            return Err(ParserError::parse_pair(
+                &unexpected,
+                format!("unexpected call argument `{}`", unexpected.as_str()),
+            ));
+        }
+        None => Vec::new(),
+    };
+    Ok(Expr::Call {
+        name,
+        name_span,
+        args,
+        span,
+    })
+}
+
+fn parse_arg_list(pair: Pair<'_, Rule>) -> ParseResult<Vec<Spanned<Literal>>> {
+    pair.into_inner().map(parse_literal).collect()
 }
 
 fn parse_comparison(pair: Pair<'_, Rule>) -> ParseResult<Expr> {

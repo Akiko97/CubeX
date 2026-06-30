@@ -8,6 +8,7 @@ pub struct Strategy {
     pub store: Option<StoreDecl>,
     pub plugins: Vec<PluginDecl>,
     pub lets: Vec<LetDecl>,
+    pub functions: Vec<PredicateFnDecl>,
     pub routes: Vec<RouteDecl>,
 }
 
@@ -92,6 +93,15 @@ pub struct LetDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredicateFnDecl {
+    pub name: String,
+    pub name_span: SourceSpan,
+    pub span: SourceSpan,
+    pub params: Vec<Spanned<String>>,
+    pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteDecl {
     pub name: String,
     pub name_span: SourceSpan,
@@ -122,14 +132,21 @@ pub enum Expr {
         name: String,
         span: SourceSpan,
     },
+    Call {
+        name: String,
+        name_span: SourceSpan,
+        args: Vec<Spanned<Literal>>,
+        span: SourceSpan,
+    },
 }
 
 impl Expr {
     pub fn span(&self) -> SourceSpan {
         match self {
-            Expr::And { span, .. } | Expr::Comparison { span, .. } | Expr::Ref { span, .. } => {
-                *span
-            }
+            Expr::And { span, .. }
+            | Expr::Comparison { span, .. }
+            | Expr::Ref { span, .. }
+            | Expr::Call { span, .. } => *span,
         }
     }
 }

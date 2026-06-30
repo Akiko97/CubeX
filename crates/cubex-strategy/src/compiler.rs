@@ -1,6 +1,6 @@
 use crate::ast::{
-    CapabilityDecl, CapabilityKind, Expr, FieldPath, Literal, PluginDecl, PluginKind, RouteDecl,
-    SourceSpan, Spanned, Strategy,
+    CapabilityDecl, CapabilityKind, Expr, FieldPath, Literal, PluginDecl, PluginKind,
+    PredicateFnDecl, RouteDecl, SourceSpan, Spanned, Strategy,
 };
 use crate::error::{Result, StrategyError};
 use crate::parser::parse_str_with_source;
@@ -106,10 +106,29 @@ fn compile_strategy(strategy: Strategy, base_dir: Option<&Path>) -> CompileResul
         }
     }
 
+    let mut functions = BTreeMap::new();
+    for declaration in strategy.functions {
+        let name_span = declaration.name_span;
+        insert_symbol(&mut symbols, "binding", &declaration.name, name_span)?;
+        let function = compile_predicate_fn(declaration)?;
+        if functions.insert(function.name.clone(), function).is_some() {
+            return Err(CompileError::at(
+                name_span,
+                "predicate function declared more than once",
+            ));
+        }
+    }
+
     let mut routes = Vec::new();
     for route in strategy.routes {
         insert_symbol(&mut symbols, "binding", &route.name, route.name_span)?;
-        routes.push(compile_route(route, &lets, &plugin_names, &engine.name)?);
+        routes.push(compile_route(
+            route,
+            &lets,
+            &functions,
+            &plugin_names,
+            &engine.name,
+        )?);
     }
 
     let mut config = Config {
@@ -122,6 +141,33 @@ fn compile_strategy(strategy: Strategy, base_dir: Option<&Path>) -> CompileResul
         config.resolve_relative_paths(base_dir);
     }
     Ok(config)
+}
+
+#[derive(Debug, Clone)]
+struct PredicateFn {
+    name: String,
+    params: Vec<Spanned<String>>,
+    expr: Expr,
+}
+
+fn compile_predicate_fn(declaration: PredicateFnDecl) -> CompileResult<PredicateFn> {
+    let mut params = BTreeSet::new();
+    for param in &declaration.params {
+        if !params.insert(param.value.clone()) {
+            return Err(CompileError::at(
+                param.span,
+                format!(
+                    "predicate function `{}` declares parameter `{}` more than once",
+                    declaration.name, param.value
+                ),
+            ));
+        }
+    }
+    Ok(PredicateFn {
+        name: declaration.name,
+        params: declaration.params,
+        expr: declaration.expr,
+    })
 }
 
 fn insert_symbol(
@@ -202,6 +248,7 @@ fn compile_capability(capability: CapabilityDecl) -> CapabilityConfig {
 fn compile_route(
     route: RouteDecl,
     lets: &BTreeMap<String, Expr>,
+    functions: &BTreeMap<String, PredicateFn>,
     plugin_names: &BTreeSet<String>,
     engine_name: &str,
 ) -> CompileResult<RouteConfig> {
@@ -241,30 +288,52 @@ fn compile_route(
     }
 
     let mut stack = BTreeSet::new();
-    let filter = compile_expr(&route_expr, lets, plugin_names, engine_name, &mut stack)?;
+    let bindings = PredicateBindings::new();
+    let filter = compile_expr(
+        &route_expr,
+        lets,
+        functions,
+        plugin_names,
+        engine_name,
+        &mut stack,
+        &bindings,
+    )?;
     filter.into_route(route_name, to, route_expr.span())
 }
+
+type PredicateBindings = BTreeMap<String, Spanned<Literal>>;
 
 fn compile_expr(
     expr: &Expr,
     lets: &BTreeMap<String, Expr>,
+    functions: &BTreeMap<String, PredicateFn>,
     plugin_names: &BTreeSet<String>,
     engine_name: &str,
     stack: &mut BTreeSet<String>,
+    bindings: &PredicateBindings,
 ) -> CompileResult<RouteFilter> {
     match expr {
         Expr::And { parts, .. } => {
             let mut filter = RouteFilter::default();
             for part in parts {
                 filter.merge(
-                    compile_expr(part, lets, plugin_names, engine_name, stack)?,
+                    compile_expr(
+                        part,
+                        lets,
+                        functions,
+                        plugin_names,
+                        engine_name,
+                        stack,
+                        bindings,
+                    )?,
                     part.span(),
                 )?;
             }
             Ok(filter)
         }
         Expr::Comparison { field, value, .. } => {
-            compile_comparison(field, value, plugin_names, engine_name)
+            let value = resolve_literal(value, bindings);
+            compile_comparison(field, &value, plugin_names, engine_name)
         }
         Expr::Ref { name, span } => {
             if !stack.insert(name.clone()) {
@@ -274,12 +343,91 @@ fn compile_expr(
                 ));
             }
             let expr = lets.get(name).ok_or_else(|| {
-                CompileError::at(*span, format!("unknown predicate reference `{name}`"))
+                if functions.contains_key(name) {
+                    CompileError::at(
+                        *span,
+                        format!("predicate function `{name}` must be called with parentheses"),
+                    )
+                } else {
+                    CompileError::at(*span, format!("unknown predicate reference `{name}`"))
+                }
             })?;
-            let filter = compile_expr(expr, lets, plugin_names, engine_name, stack);
+            let filter = compile_expr(
+                expr,
+                lets,
+                functions,
+                plugin_names,
+                engine_name,
+                stack,
+                bindings,
+            );
             stack.remove(name);
             filter
         }
+        Expr::Call {
+            name,
+            name_span,
+            args,
+            span,
+        } => {
+            let function = functions.get(name).ok_or_else(|| {
+                if lets.contains_key(name) {
+                    CompileError::at(
+                        *name_span,
+                        format!("predicate `{name}` is not parameterized and cannot be called"),
+                    )
+                } else {
+                    CompileError::at(*name_span, format!("unknown predicate function `{name}`"))
+                }
+            })?;
+            if function.params.len() != args.len() {
+                return Err(CompileError::at(
+                    *span,
+                    format!(
+                        "predicate function `{name}` expects {} argument{} but got {}",
+                        function.params.len(),
+                        plural_suffix(function.params.len()),
+                        args.len()
+                    ),
+                ));
+            }
+            if !stack.insert(name.clone()) {
+                return Err(CompileError::at(
+                    *name_span,
+                    format!("predicate reference cycle includes `{name}`"),
+                ));
+            }
+
+            let resolved_args = args
+                .iter()
+                .map(|arg| resolve_literal(arg, bindings))
+                .collect::<Vec<_>>();
+            let mut call_bindings = bindings.clone();
+            for (param, arg) in function.params.iter().zip(resolved_args) {
+                call_bindings.insert(param.value.clone(), arg);
+            }
+            let filter = compile_expr(
+                &function.expr,
+                lets,
+                functions,
+                plugin_names,
+                engine_name,
+                stack,
+                &call_bindings,
+            );
+            stack.remove(name);
+            filter
+        }
+    }
+}
+
+fn resolve_literal(literal: &Spanned<Literal>, bindings: &PredicateBindings) -> Spanned<Literal> {
+    match &literal.value {
+        Literal::Ident(name) => bindings
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| literal.clone()),
+        _ => literal.clone(),
     }
 }
 
@@ -438,4 +586,8 @@ fn payload_label(payload: PayloadKind) -> &'static str {
         PayloadKind::Bytes => "bytes",
         PayloadKind::Record => "record",
     }
+}
+
+fn plural_suffix(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }

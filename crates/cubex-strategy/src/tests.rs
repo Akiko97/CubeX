@@ -61,6 +61,112 @@ strategy "records" {
 }
 
 #[test]
+fn compiles_parameterized_predicates() {
+    let config = compile_str(
+        r#"
+strategy "parameterized" {
+  plugin hello = process("hello")
+  plugin print = process("print")
+
+  fn from_topic(src, t, kind) =
+    source == src && topic == t && payload == kind
+
+  route greeting-to-print = from_topic(hello, "hello.greeting", text) -> [print]
+}
+"#,
+    )
+    .unwrap();
+
+    let route = &config.routes[0];
+    assert_eq!(route.source.as_deref(), Some("hello"));
+    assert_eq!(route.topic.as_deref(), Some("hello.greeting"));
+    assert_eq!(route.payload, Some(PayloadKind::Text));
+}
+
+#[test]
+fn compiles_nested_parameterized_predicates() {
+    let config = compile_str(
+        r#"
+strategy "nested" {
+  plugin source = process("source")
+  plugin print = process("print")
+
+  fn from_topic(src, t, kind) =
+    source == src && topic == t && payload == kind
+
+  fn text_from(src, t) = from_topic(src, t, text)
+
+  route source-to-print = text_from(source, "source.ready") -> [print]
+}
+"#,
+    )
+    .unwrap();
+
+    let route = &config.routes[0];
+    assert_eq!(route.source.as_deref(), Some("source"));
+    assert_eq!(route.topic.as_deref(), Some("source.ready"));
+    assert_eq!(route.payload, Some(PayloadKind::Text));
+}
+
+#[test]
+fn rejects_parameterized_predicate_arity_mismatch() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin source = process("source")
+  plugin print = process("print")
+
+  fn from_topic(src, t) = source == src && topic == t
+
+  route bad-route = from_topic(source) -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("expects 2 arguments but got 1"));
+}
+
+#[test]
+fn rejects_unknown_parameterized_predicate() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin source = process("source")
+  plugin print = process("print")
+
+  route bad-route = missing(source) -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("unknown predicate function `missing`"));
+}
+
+#[test]
+fn rejects_duplicate_parameter_names() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin source = process("source")
+  plugin print = process("print")
+
+  fn bad(src, src) = source == src
+
+  route bad-route = bad(source, source) -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("declares parameter `src` more than once"));
+}
+
+#[test]
 fn rejects_unknown_route_targets() {
     let error = compile_str(
         r#"

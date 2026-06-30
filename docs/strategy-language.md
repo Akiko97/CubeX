@@ -14,10 +14,10 @@ CubeX's current static route fields: `source`, `topic`, `payload`, and exact
 
 The language is designed around strong functional constraints:
 
-- Top-level declarations are immutable bindings: `plugin`, `let`, and `route`
-  names cannot be rebound.
-- `let` declarations define pure predicates. A predicate has no IO, no mutation,
-  no time dependency, and no access to plugin state.
+- Top-level declarations are immutable bindings: `plugin`, `let`, `fn`, and
+  `route` names cannot be rebound.
+- `let` and `fn` declarations define pure predicates. A predicate has no IO, no
+  mutation, no time dependency, and no access to plugin state.
 - `route name = predicate -> [targets]` is treated as a pure function from a
   message to a fixed list of plugin targets.
 - Composition is explicit with `&&` and predicate references. The first compiler
@@ -106,6 +106,18 @@ let alice_records =
   record.active == true
 ```
 
+Parameterized predicates use `fn` declarations. Parameters stand for comparison
+values, so shared policy can be expressed once and called from routes or other
+predicate functions:
+
+```cx
+fn from_topic(src, t, kind) =
+  source == src && topic == t && payload == kind
+
+route greeting-to-print =
+  from_topic(hello, "hello.greeting", text) -> [print]
+```
+
 Fields:
 
 - `source == hello`
@@ -133,6 +145,9 @@ The strategy compiler performs checks before handing the config to CubeX:
 - unknown route targets;
 - unknown `source` references;
 - unknown `let` predicate references;
+- unknown `fn` predicate calls;
+- predicate function argument count mismatches;
+- duplicate predicate function parameter names;
 - cycles between predicates;
 - conflicting predicates such as `payload == text && payload == record`;
 - duplicate or conflicting record field predicates;

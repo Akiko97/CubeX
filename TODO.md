@@ -30,7 +30,7 @@
   cargo run -p cubex-cli -- check -c examples/bad/cubex.cx
   ```
 
-- [ ] Add parameterized predicates.
+- [x] Add parameterized predicates.
 
   Current `let` bindings define only zero-argument predicates. Parameterized
   predicates would reduce repeated route conditions and make shared policy

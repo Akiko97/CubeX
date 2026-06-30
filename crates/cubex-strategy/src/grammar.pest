@@ -4,7 +4,7 @@ COMMENT = _{ "#" ~ (!NEWLINE ~ ANY)* }
 file = { SOI ~ strategy_decl ~ EOI }
 strategy_decl = { "strategy" ~ string ~ block }
 block = { "{" ~ item* ~ "}" }
-item = _{ engine_decl | store_decl | plugin_decl | let_decl | route_decl }
+item = _{ engine_decl | store_decl | plugin_decl | let_decl | fn_decl | route_decl }
 
 engine_decl = { "engine" ~ "{" ~ engine_field* ~ "}" }
 engine_field = _{ engine_name_field | max_messages_field }
@@ -36,12 +36,16 @@ record_store_capability = { "record_store" ~ "(" ~ string ~ ")" }
 timer_capability = { "timer" }
 
 let_decl = { "let" ~ ident ~ "=" ~ expr }
+fn_decl = { "fn" ~ ident ~ "(" ~ param_list? ~ ")" ~ "=" ~ expr }
+param_list = { ident ~ ("," ~ ident)* ~ ","? }
 route_decl = { "route" ~ ident ~ "=" ~ expr ~ "->" ~ target_list }
 
 expr = { and_expr }
 and_expr = { primary ~ ("&&" ~ primary)* }
-primary = _{ comparison | ref_expr | "(" ~ expr ~ ")" }
+primary = _{ comparison | call_expr | ref_expr | "(" ~ expr ~ ")" }
 ref_expr = { ident }
+call_expr = { ident ~ "(" ~ arg_list? ~ ")" }
+arg_list = { value ~ ("," ~ value)* ~ ","? }
 comparison = { field_path ~ "==" ~ value }
 field_path = { "source" | "topic" | "payload" | "record" ~ "." ~ ident }
 value = _{ string | bool | int | payload_kind | ident }

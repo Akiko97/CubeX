@@ -10,8 +10,15 @@ strategy "strategy-hello-example" {
 
   plugin print = process("../../target/debug/cubex-print-plugin")
 
-  let greetings =
-    source == hello && topic == "hello.greeting" && payload == text
+  # Old zero-argument predicate style:
+  # let greetings =
+  #   source == hello && topic == "hello.greeting" && payload == text
+  #
+  # route greeting-to-print = greetings -> [print]
 
-  route greeting-to-print = greetings -> [print]
+  fn from_topic(src, t, kind) =
+    source == src && topic == t && payload == kind
+
+  route greeting-to-print =
+    from_topic(hello, "hello.greeting", text) -> [print]
 }
