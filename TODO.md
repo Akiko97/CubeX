@@ -58,7 +58,7 @@
   include "../common/predicates.cx"
   ```
 
-- [ ] Add static checks for unused plugins and unused predicate bindings.
+- [x] Add static checks for unused plugins and unused predicate bindings.
 
   The compiler should warn or fail when declarations are never referenced. This
   catches stale topology after route edits.

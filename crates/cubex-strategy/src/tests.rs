@@ -43,7 +43,7 @@ strategy "records" {
   plugin source = process("source")
   plugin print = process("print")
 
-  let alice = topic == "record.put" && record.user == "alice" && record.priority == 7
+  let alice = source == source && topic == "record.put" && record.user == "alice" && record.priority == 7
 
   route alice-to-print = alice -> [print]
 }
@@ -291,6 +291,8 @@ strategy "paths" {
   plugin source = process("bin/source") {
     working_dir = "."
   }
+
+  route source-loop = source == source -> [source]
 }
 "#,
         &temp,
@@ -363,6 +365,90 @@ strategy "included" {
     assert_eq!(config.routes[0].to, vec!["print"]);
 
     let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn rejects_unused_plugins() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin source = process("source")
+  plugin print = process("print")
+  plugin debug-sink = process("debug")
+
+  route source-to-print = source == source -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("unused plugin `debug-sink`"));
+}
+
+#[test]
+fn permits_autostart_plugins_without_explicit_route_references() {
+    let config = compile_str(
+        r#"
+strategy "autostart" {
+  plugin server = process("server") {
+    autostart = true
+  }
+  plugin source = process("source") {
+    autostart = true
+  }
+  plugin print = process("print")
+
+  route source-to-print = source == source && payload == text -> [print]
+}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(config.plugins.len(), 3);
+    assert_eq!(config.routes[0].source.as_deref(), Some("source"));
+}
+
+#[test]
+fn rejects_unused_predicate_bindings() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin source = process("source")
+  plugin print = process("print")
+
+  let used = source == source
+  let unused-records = topic == "record.put" && payload == record
+
+  route source-to-print = used -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("unused predicate binding `unused-records`"));
+}
+
+#[test]
+fn rejects_unused_predicate_functions() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin source = process("source")
+  plugin print = process("print")
+
+  fn used(src) = source == src
+  fn unused(src) = source == src
+
+  route source-to-print = used(source) -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("unused predicate function `unused`"));
 }
 
 #[test]

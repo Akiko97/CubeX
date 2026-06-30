@@ -557,14 +557,21 @@ fn compile_strategy(strategy: Strategy, resolver: PathResolver<'_>) -> CompileRe
 
     let mut symbols = BTreeSet::new();
     let mut plugin_names = BTreeSet::new();
+    let mut plugin_declarations = Vec::new();
     let mut plugins = Vec::new();
     for plugin in strategy.plugins {
         insert_symbol(&mut symbols, "binding", &plugin.name, plugin.name_span)?;
         plugin_names.insert(plugin.name.clone());
+        plugin_declarations.push(PluginStaticInfo {
+            name: plugin.name.clone(),
+            name_span: plugin.name_span,
+            autostart: plugin.autostart,
+        });
         plugins.push(compile_plugin(plugin, resolver)?);
     }
 
     let mut lets = BTreeMap::new();
+    let mut predicate_declarations = Vec::new();
     for declaration in strategy.lets {
         insert_symbol(
             &mut symbols,
@@ -572,6 +579,11 @@ fn compile_strategy(strategy: Strategy, resolver: PathResolver<'_>) -> CompileRe
             &declaration.name,
             declaration.name_span,
         )?;
+        predicate_declarations.push(PredicateStaticInfo {
+            name: declaration.name.clone(),
+            name_span: declaration.name_span,
+            kind: PredicateKind::Binding,
+        });
         if lets
             .insert(declaration.name.clone(), declaration.expr)
             .is_some()
@@ -587,6 +599,11 @@ fn compile_strategy(strategy: Strategy, resolver: PathResolver<'_>) -> CompileRe
     for declaration in strategy.functions {
         let name_span = declaration.name_span;
         insert_symbol(&mut symbols, "binding", &declaration.name, name_span)?;
+        predicate_declarations.push(PredicateStaticInfo {
+            name: declaration.name.clone(),
+            name_span,
+            kind: PredicateKind::Function,
+        });
         let function = compile_predicate_fn(declaration)?;
         if functions.insert(function.name.clone(), function).is_some() {
             return Err(CompileError::at(
@@ -597,16 +614,35 @@ fn compile_strategy(strategy: Strategy, resolver: PathResolver<'_>) -> CompileRe
     }
 
     let mut routes = Vec::new();
+    let mut usage = StaticUsage::default();
     for route in strategy.routes {
         insert_symbol(&mut symbols, "binding", &route.name, route.name_span)?;
-        routes.push(compile_route(
+        let route = compile_route(
             route,
             &lets,
             &functions,
             &plugin_names,
             &engine.name,
-        )?);
+            &mut usage,
+        )?;
+        if let Some(source) = &route.source
+            && plugin_names.contains(source)
+        {
+            usage.plugins.insert(source.clone());
+        }
+        usage.plugins.extend(route.to.iter().cloned());
+        routes.push(route);
     }
+
+    usage.plugins.extend(
+        plugin_declarations
+            .iter()
+            .filter(|plugin| plugin.autostart)
+            .map(|plugin| plugin.name.clone()),
+    );
+
+    check_unused_plugins(&plugin_declarations, &usage)?;
+    check_unused_predicates(&predicate_declarations, &usage)?;
 
     Ok(Config {
         engine,
@@ -614,6 +650,66 @@ fn compile_strategy(strategy: Strategy, resolver: PathResolver<'_>) -> CompileRe
         plugins,
         routes,
     })
+}
+
+#[derive(Debug, Clone)]
+struct PluginStaticInfo {
+    name: String,
+    name_span: SourceSpan,
+    autostart: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PredicateStaticInfo {
+    name: String,
+    name_span: SourceSpan,
+    kind: PredicateKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PredicateKind {
+    Binding,
+    Function,
+}
+
+#[derive(Debug, Default)]
+struct StaticUsage {
+    plugins: BTreeSet<String>,
+    predicates: BTreeSet<String>,
+}
+
+fn check_unused_plugins(
+    plugin_declarations: &[PluginStaticInfo],
+    usage: &StaticUsage,
+) -> CompileResult<()> {
+    for plugin in plugin_declarations {
+        if !usage.plugins.contains(&plugin.name) {
+            return Err(CompileError::at(
+                plugin.name_span,
+                format!("unused plugin `{}`", plugin.name),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_unused_predicates(
+    predicate_declarations: &[PredicateStaticInfo],
+    usage: &StaticUsage,
+) -> CompileResult<()> {
+    for predicate in predicate_declarations {
+        if !usage.predicates.contains(&predicate.name) {
+            let label = match predicate.kind {
+                PredicateKind::Binding => "predicate binding",
+                PredicateKind::Function => "predicate function",
+            };
+            return Err(CompileError::at(
+                predicate.name_span,
+                format!("unused {label} `{}`", predicate.name),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -728,6 +824,7 @@ fn compile_route(
     functions: &BTreeMap<String, PredicateFn>,
     plugin_names: &BTreeSet<String>,
     engine_name: &str,
+    usage: &mut StaticUsage,
 ) -> CompileResult<RouteConfig> {
     let route_name = route.name;
     let route_expr = route.expr;
@@ -774,6 +871,7 @@ fn compile_route(
         engine_name,
         &mut stack,
         &bindings,
+        usage,
     )?;
     filter.into_route(route_name, to, route_expr.span())
 }
@@ -788,6 +886,7 @@ fn compile_expr(
     engine_name: &str,
     stack: &mut BTreeSet<String>,
     bindings: &PredicateBindings,
+    usage: &mut StaticUsage,
 ) -> CompileResult<RouteFilter> {
     match expr {
         Expr::And { parts, .. } => {
@@ -802,6 +901,7 @@ fn compile_expr(
                         engine_name,
                         stack,
                         bindings,
+                        usage,
                     )?,
                     part.span(),
                 )?;
@@ -829,6 +929,7 @@ fn compile_expr(
                     CompileError::at(*span, format!("unknown predicate reference `{name}`"))
                 }
             })?;
+            usage.predicates.insert(name.clone());
             let filter = compile_expr(
                 expr,
                 lets,
@@ -837,6 +938,7 @@ fn compile_expr(
                 engine_name,
                 stack,
                 bindings,
+                usage,
             );
             stack.remove(name);
             filter
@@ -868,6 +970,7 @@ fn compile_expr(
                     ),
                 ));
             }
+            usage.predicates.insert(name.clone());
             if !stack.insert(name.clone()) {
                 return Err(CompileError::at(
                     *name_span,
@@ -891,6 +994,7 @@ fn compile_expr(
                 engine_name,
                 stack,
                 &call_bindings,
+                usage,
             );
             stack.remove(name);
             filter

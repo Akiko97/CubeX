@@ -1,0 +1,20 @@
+strategy "unused-declarations-warning" {
+  plugin source = process("../../../target/debug/cubex-hello-plugin") {
+    autostart = true
+  }
+
+  plugin print = process("../../../target/debug/cubex-print-plugin")
+
+  # This plugin is intentionally never used as a route source or target.
+  # The compiler reports: unused plugin `debug-sink`
+  plugin debug-sink = process("../../../target/debug/cubex-print-plugin")
+
+  let greeting = source == source && topic == "hello.greeting" && payload == text
+
+  # This predicate binding is intentionally never referenced by any route.
+  # After removing the unused plugin above, the compiler reports:
+  # unused predicate binding `unused-records`
+  let unused-records = topic == "record.put" && payload == record
+
+  route greeting-to-print = greeting -> [print]
+}
