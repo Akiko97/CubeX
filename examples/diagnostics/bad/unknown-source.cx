@@ -1,0 +1,6 @@
+strategy "bad-diagnostics" {
+  plugin print = process("../../../target/debug/cubex-print-plugin")
+
+  # This route is intentionally wrong: `missing` is not a declared plugin or engine.
+  route missing-source = source == missing -> [print]
+}

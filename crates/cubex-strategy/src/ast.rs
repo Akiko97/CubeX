@@ -3,6 +3,7 @@ use cubex_protocol::PayloadKind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Strategy {
     pub name: String,
+    pub span: SourceSpan,
     pub engine: Option<EngineDecl>,
     pub store: Option<StoreDecl>,
     pub plugins: Vec<PluginDecl>,
@@ -10,21 +11,49 @@ pub struct Strategy {
     pub routes: Vec<RouteDecl>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SourceSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl SourceSpan {
+    pub fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spanned<T> {
+    pub value: T,
+    pub span: SourceSpan,
+}
+
+impl<T> Spanned<T> {
+    pub fn new(value: T, span: SourceSpan) -> Self {
+        Self { value, span }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EngineDecl {
     pub name: Option<String>,
     pub max_messages: Option<usize>,
+    pub span: SourceSpan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoreDecl {
     pub path: Option<String>,
     pub replay_on_start: Option<bool>,
+    pub span: SourceSpan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginDecl {
     pub name: String,
+    pub name_span: SourceSpan,
+    pub span: SourceSpan,
     pub kind: PluginKind,
     pub args: Vec<String>,
     pub autostart: bool,
@@ -39,7 +68,13 @@ pub enum PluginKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CapabilityDecl {
+pub struct CapabilityDecl {
+    pub kind: CapabilityKind,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityKind {
     FileRead(String),
     FileWrite(String),
     TcpConnect(String),
@@ -51,21 +86,52 @@ pub enum CapabilityDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LetDecl {
     pub name: String,
+    pub name_span: SourceSpan,
+    pub span: SourceSpan,
     pub expr: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteDecl {
     pub name: String,
+    pub name_span: SourceSpan,
+    pub span: SourceSpan,
     pub expr: Expr,
-    pub targets: Vec<String>,
+    pub targets: Vec<RouteTarget>,
+    pub target_list_span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteTarget {
+    pub name: String,
+    pub span: SourceSpan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
-    And(Vec<Expr>),
-    Comparison { field: FieldPath, value: Literal },
-    Ref(String),
+    And {
+        parts: Vec<Expr>,
+        span: SourceSpan,
+    },
+    Comparison {
+        field: Spanned<FieldPath>,
+        value: Spanned<Literal>,
+        span: SourceSpan,
+    },
+    Ref {
+        name: String,
+        span: SourceSpan,
+    },
+}
+
+impl Expr {
+    pub fn span(&self) -> SourceSpan {
+        match self {
+            Expr::And { span, .. } | Expr::Comparison { span, .. } | Expr::Ref { span, .. } => {
+                *span
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

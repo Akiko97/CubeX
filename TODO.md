@@ -2,7 +2,7 @@
 
 ## Strategy Language Evolution
 
-- [ ] Add source-position diagnostics for parse and compile errors.
+- [x] Add source-position diagnostics for parse and compile errors.
 
   Today, many strategy errors are readable but not anchored to the exact source
   location that caused them. The compiler should report the file, line, column,

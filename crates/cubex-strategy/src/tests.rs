@@ -1,4 +1,4 @@
-use crate::{compile_str, compile_str_with_base};
+use crate::{compile_file, compile_str, compile_str_with_base};
 use cubex_core::RouteValue;
 use cubex_protocol::PayloadKind;
 
@@ -74,6 +74,48 @@ strategy "bad" {
     .to_string();
 
     assert!(error.contains("unknown plugin `missing`"));
+}
+
+#[test]
+fn reports_parse_errors_with_source_locations() {
+    let error = compile_str(
+        "strategy \"bad\" {\n  plugin print = process(\"print\")\n  route bad-route = source = print -> [print]\n}\n",
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("strategy parse error at <input>:3:21"));
+    assert!(error.contains("  route bad-route = source = print -> [print]"));
+    assert!(error.contains("^"));
+    assert!(error.contains("expected"));
+}
+
+#[test]
+fn reports_compile_errors_with_source_locations() {
+    let temp = std::env::temp_dir().join(format!(
+        "cubex-strategy-diagnostic-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp);
+    std::fs::create_dir(&temp).unwrap();
+    let source = temp.join("cubex.cx");
+    std::fs::write(
+        &source,
+        "strategy \"bad\" {\n  plugin print = process(\"print\")\n  route bad-route = source == missing -> [print]\n}\n",
+    )
+    .unwrap();
+
+    let error = compile_file(&source).unwrap_err().to_string();
+
+    assert!(error.contains(&format!(
+        "strategy compile error at {}:3:31",
+        source.display()
+    )));
+    assert!(error.contains("  route bad-route = source == missing -> [print]"));
+    assert!(error.contains("^^^^^^^"));
+    assert!(error.contains("unknown plugin or engine `missing`"));
+
+    let _ = std::fs::remove_dir_all(temp);
 }
 
 #[test]
