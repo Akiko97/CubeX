@@ -40,6 +40,13 @@ type CompileResult<T> = std::result::Result<T, CompileError>;
 struct CompileError {
     span: SourceSpan,
     message: String,
+    kind: CompileErrorKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompileErrorKind {
+    General,
+    UnreachableRoute,
 }
 
 impl CompileError {
@@ -47,6 +54,27 @@ impl CompileError {
         Self {
             span,
             message: message.into(),
+            kind: CompileErrorKind::General,
+        }
+    }
+
+    fn unreachable_route(span: SourceSpan, reason: impl Into<String>) -> Self {
+        Self {
+            span,
+            message: reason.into(),
+            kind: CompileErrorKind::UnreachableRoute,
+        }
+    }
+
+    fn with_route_context(self, route_name: &str) -> Self {
+        if self.kind != CompileErrorKind::UnreachableRoute {
+            return self;
+        }
+
+        Self {
+            span: self.span,
+            message: format!("route `{route_name}` is unreachable: {}", self.message),
+            kind: CompileErrorKind::General,
         }
     }
 }
@@ -872,8 +900,11 @@ fn compile_route(
         &mut stack,
         &bindings,
         usage,
-    )?;
-    filter.into_route(route_name, to, route_expr.span())
+    )
+    .map_err(|err| err.with_route_context(&route_name))?;
+    filter
+        .into_route(route_name.clone(), to, route_expr.span())
+        .map_err(|err| err.with_route_context(&route_name))
 }
 
 type PredicateBindings = BTreeMap<String, Spanned<Literal>>;
@@ -1090,20 +1121,35 @@ struct RouteFilter {
 
 impl RouteFilter {
     fn merge(&mut self, other: Self, span: SourceSpan) -> CompileResult<()> {
-        merge_option("source", &mut self.source, other.source, span)?;
-        merge_option("topic", &mut self.topic, other.topic, span)?;
-        merge_option("payload", &mut self.payload, other.payload, span)?;
+        merge_option("source", &mut self.source, other.source, span, |value| {
+            string_value_label(value)
+        })?;
+        merge_option("topic", &mut self.topic, other.topic, span, |value| {
+            string_literal_label(value)
+        })?;
+        merge_option(
+            "payload",
+            &mut self.payload,
+            other.payload,
+            span,
+            payload_value_label,
+        )?;
         for (key, value) in other.record {
             if let Some(existing) = self.record.get(&key)
                 && existing != &value
             {
-                return Err(CompileError::at(
+                return Err(CompileError::unreachable_route(
                     span,
-                    format!("conflicting record field predicate for `{key}`"),
+                    format!(
+                        "conflicting `record.{key}` predicates: {} vs {}",
+                        route_value_label(existing),
+                        route_value_label(&value)
+                    ),
                 ));
             }
             self.record.insert(key, value);
         }
+        self.check_record_payload_compatibility(span)?;
         Ok(())
     }
 
@@ -1118,10 +1164,10 @@ impl RouteFilter {
                 None => self.payload = Some(PayloadKind::Record),
                 Some(PayloadKind::Record) => {}
                 Some(payload) => {
-                    return Err(CompileError::at(
+                    return Err(CompileError::unreachable_route(
                         span,
                         format!(
-                            "route `{name}` has record predicates but payload is `{}`",
+                            "record predicates require payload `record`, but payload is `{}`",
                             payload_label(payload)
                         ),
                     ));
@@ -1137,13 +1183,30 @@ impl RouteFilter {
             to,
         })
     }
+
+    fn check_record_payload_compatibility(&self, span: SourceSpan) -> CompileResult<()> {
+        if !self.record.is_empty()
+            && let Some(payload) = self.payload
+            && payload != PayloadKind::Record
+        {
+            return Err(CompileError::unreachable_route(
+                span,
+                format!(
+                    "record predicates require payload `record`, but payload is `{}`",
+                    payload_label(payload)
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
-fn merge_option<T: Eq + std::fmt::Debug>(
+fn merge_option<T: Eq>(
     field: &str,
     target: &mut Option<T>,
     incoming: Option<T>,
     span: SourceSpan,
+    label: impl Fn(&T) -> String,
 ) -> CompileResult<()> {
     let Some(incoming) = incoming else {
         return Ok(());
@@ -1151,13 +1214,37 @@ fn merge_option<T: Eq + std::fmt::Debug>(
     if let Some(existing) = target.as_ref()
         && existing != &incoming
     {
-        return Err(CompileError::at(
+        return Err(CompileError::unreachable_route(
             span,
-            format!("conflicting `{field}` predicates: {existing:?} vs {incoming:?}"),
+            format!(
+                "conflicting `{field}` predicates: {} vs {}",
+                label(existing),
+                label(&incoming)
+            ),
         ));
     }
     *target = Some(incoming);
     Ok(())
+}
+
+fn string_value_label(value: &str) -> String {
+    format!("`{}`", value.escape_debug())
+}
+
+fn string_literal_label(value: &str) -> String {
+    format!("`\"{}\"`", value.escape_debug())
+}
+
+fn payload_value_label(payload: &PayloadKind) -> String {
+    format!("`{}`", payload_label(*payload))
+}
+
+fn route_value_label(value: &RouteValue) -> String {
+    match value {
+        RouteValue::Bool(value) => format!("`{value}`"),
+        RouteValue::I64(value) => format!("`{value}`"),
+        RouteValue::String(value) => string_literal_label(value),
+    }
 }
 
 fn payload_label(payload: PayloadKind) -> &'static str {

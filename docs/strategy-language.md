@@ -176,9 +176,11 @@ The strategy compiler performs checks before handing the config to CubeX:
 - predicate function argument count mismatches;
 - duplicate predicate function parameter names;
 - cycles between predicates;
-- conflicting predicates such as `payload == text && payload == record`;
-- duplicate or conflicting record field predicates;
-- empty target lists.
+- unreachable routes caused by contradictory predicates such as
+  `payload == text && payload == record`;
+- conflicting record field predicates, such as
+  `record.user == "alice" && record.user == "bob"`;
+- empty target lists;
 - missing include files and include cycles.
 
 The generated `Config` is still validated by `cubex-core`, and `cubex check

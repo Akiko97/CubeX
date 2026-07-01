@@ -72,7 +72,7 @@
 
   Neither declaration should silently remain unused.
 
-- [ ] Add static checks for unreachable routes.
+- [x] Add static checks for unreachable routes.
 
   A route can be syntactically valid but impossible to match because its
   predicate is contradictory or shadowed by impossible conditions.

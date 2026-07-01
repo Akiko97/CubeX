@@ -1,0 +1,9 @@
+strategy "unreachable-route-diagnostics" {
+  plugin print = process("../../../target/debug/cubex-print-plugin")
+
+  # This route is intentionally impossible to match: a payload cannot be both
+  # text and record.
+  # The compiler reports: route `impossible` is unreachable.
+  route impossible =
+    payload == text && payload == record -> [print]
+}

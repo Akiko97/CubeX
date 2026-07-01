@@ -255,7 +255,85 @@ strategy "bad" {
     .unwrap_err()
     .to_string();
 
-    assert!(error.contains("record predicates but payload is `text`"));
+    assert!(error.contains("route `bad-route` is unreachable"));
+    assert!(error.contains("record predicates require payload `record`, but payload is `text`"));
+}
+
+#[test]
+fn rejects_unreachable_routes_with_conflicting_payload_predicates() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin print = process("print")
+
+  route bad-route = payload == text && payload == record -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("route `bad-route` is unreachable"));
+    assert!(error.contains("conflicting `payload` predicates: `text` vs `record`"));
+}
+
+#[test]
+fn rejects_unreachable_routes_with_conflicting_source_predicates() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin source = process("source")
+  plugin other = process("other")
+  plugin print = process("print")
+
+  route bad-route = source == source && source == other -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("route `bad-route` is unreachable"));
+    assert!(error.contains("conflicting `source` predicates: `source` vs `other`"));
+}
+
+#[test]
+fn rejects_unreachable_routes_with_conflicting_record_field_predicates() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin print = process("print")
+
+  route bad-route =
+    record.user == "alice" && record.user == "bob" -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("route `bad-route` is unreachable"));
+    assert!(error.contains("conflicting `record.user` predicates: `\"alice\"` vs `\"bob\"`"));
+}
+
+#[test]
+fn rejects_unreachable_routes_after_predicate_function_expansion() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin print = process("print")
+
+  fn has_payload(kind) = payload == kind
+
+  route bad-route = has_payload(text) && payload == record -> [print]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("route `bad-route` is unreachable"));
+    assert!(error.contains("conflicting `payload` predicates: `text` vs `record`"));
 }
 
 #[test]
