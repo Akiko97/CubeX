@@ -642,8 +642,10 @@ fn compile_strategy(strategy: Strategy, resolver: PathResolver<'_>) -> CompileRe
     }
 
     let mut routes = Vec::new();
+    let mut route_declarations = Vec::new();
     let mut usage = StaticUsage::default();
     for route in strategy.routes {
+        let route_name_span = route.name_span;
         insert_symbol(&mut symbols, "binding", &route.name, route.name_span)?;
         let route = compile_route(
             route,
@@ -659,6 +661,9 @@ fn compile_strategy(strategy: Strategy, resolver: PathResolver<'_>) -> CompileRe
             usage.plugins.insert(source.clone());
         }
         usage.plugins.extend(route.to.iter().cloned());
+        let route_declaration = RouteStaticInfo::from_route(&route, route_name_span);
+        check_equivalent_route_predicates(&route_declarations, &route_declaration)?;
+        route_declarations.push(route_declaration);
         routes.push(route);
     }
 
@@ -692,6 +697,29 @@ struct PredicateStaticInfo {
     name: String,
     name_span: SourceSpan,
     kind: PredicateKind,
+}
+
+#[derive(Debug, Clone)]
+struct RouteStaticInfo {
+    name: String,
+    name_span: SourceSpan,
+    source: Option<String>,
+    topic: Option<String>,
+    payload: Option<PayloadKind>,
+    record: BTreeMap<String, RouteValue>,
+}
+
+impl RouteStaticInfo {
+    fn from_route(route: &RouteConfig, name_span: SourceSpan) -> Self {
+        Self {
+            name: route.name.clone(),
+            name_span,
+            source: route.source.clone(),
+            topic: route.topic.clone(),
+            payload: route.payload,
+            record: route.record.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -738,6 +766,31 @@ fn check_unused_predicates(
         }
     }
     Ok(())
+}
+
+fn check_equivalent_route_predicates(
+    previous_routes: &[RouteStaticInfo],
+    route: &RouteStaticInfo,
+) -> CompileResult<()> {
+    for previous in previous_routes {
+        if route_predicates_equivalent(previous, route) {
+            return Err(CompileError::at(
+                route.name_span,
+                format!(
+                    "route `{}` has equivalent predicate to route `{}`",
+                    route.name, previous.name
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn route_predicates_equivalent(left: &RouteStaticInfo, right: &RouteStaticInfo) -> bool {
+    left.source == right.source
+        && left.topic == right.topic
+        && left.payload == right.payload
+        && left.record == right.record
 }
 
 #[derive(Debug, Clone)]

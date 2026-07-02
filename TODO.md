@@ -87,7 +87,7 @@
   Some contradictions are already caught; this check should become systematic
   and easier to explain.
 
-- [ ] Add static checks for route coverage conflicts or duplicate equivalent route predicates.
+- [x] Add static checks for route coverage conflicts or duplicate equivalent route predicates.
 
   Two routes may compile to identical match conditions. That may be intentional,
   but it is often accidental duplication.

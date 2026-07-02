@@ -337,6 +337,48 @@ strategy "bad" {
 }
 
 #[test]
+fn rejects_equivalent_route_predicates() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin hello = process("hello")
+  plugin print = process("print")
+  plugin audit = process("audit")
+
+  route a = source == hello && topic == "hello.greeting" -> [print]
+  route b = topic == "hello.greeting" && source == hello -> [audit]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("route `b` has equivalent predicate to route `a`"));
+}
+
+#[test]
+fn rejects_equivalent_route_predicates_after_binding_expansion() {
+    let error = compile_str(
+        r#"
+strategy "bad" {
+  plugin source = process("source")
+  plugin print = process("print")
+  plugin audit = process("audit")
+
+  let source_record = source == source && record.user == "alice"
+
+  route a = source_record -> [print]
+  route b = payload == record && source == source && record.user == "alice" -> [audit]
+}
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("route `b` has equivalent predicate to route `a`"));
+}
+
+#[test]
 fn detects_predicate_cycles() {
     let error = compile_str(
         r#"

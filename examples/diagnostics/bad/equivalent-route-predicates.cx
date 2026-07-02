@@ -1,0 +1,15 @@
+strategy "equivalent-route-predicates-diagnostics" {
+  plugin hello = process("../../../target/debug/cubex-hello-plugin")
+  plugin print = process("../../../target/debug/cubex-print-plugin")
+  plugin audit = process("../../../target/debug/cubex-print-plugin")
+
+  # These routes are intentionally equivalent: conjunction order does not
+  # change the route predicate.
+  # The compiler reports: route `audit-greeting` has equivalent predicate to
+  # route `print-greeting`.
+  route print-greeting =
+    source == hello && topic == "hello.greeting" -> [print]
+
+  route audit-greeting =
+    topic == "hello.greeting" && source == hello -> [audit]
+}
